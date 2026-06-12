@@ -46,6 +46,10 @@ open build/AutoKeyboard.app
 
 本机自用不要求 notarization；如果要分发给其他用户，建议使用 Developer ID 签名并 notarize。也可直接用 Xcode 打开 `Package.swift` 开发调试，但正式使用请按上面的方式打包签名后启动。
 
+## 发布
+
+仓库包含手动触发的 GitHub Actions 发布流程：进入 **Actions → Release → Run workflow**，填写版本号（如 `0.1.0`），workflow 会构建 `AutoKeyboard.app`、注入版本号、打包为 zip，并创建 `v版本号` 的 GitHub Release。
+
 ## 首次使用
 
 1. 先按「构建」步骤打包并签名，然后启动 `build/AutoKeyboard.app`。
