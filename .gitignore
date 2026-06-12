@@ -1,0 +1,17 @@
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Local build output
+build/
+DerivedData/
+
+# Xcode user state
+*.xcuserstate
+xcuserdata/
+
+# Local editor/tooling state
+.claude/
