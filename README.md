@@ -24,22 +24,38 @@ macOS 不提供控制输入法内部中英模式（如按 Shift 切换的状态�
 
 要求：macOS 14+，Xcode / Swift 6 工具链。
 
+本应用需要辅助功能权限。macOS 的 TCC 权限会绑定到 `.app` bundle 与签名身份，因此请不要直接运行 SwiftPM 生成的可执行文件；先打包成 `.app`，完成签名后再启动并授权。
+
 ```bash
 bash scripts/make-app.sh
 open build/AutoKeyboard.app
 ```
 
-也可直接用 Xcode 打开 `Package.swift` 开发调试。
+`scripts/make-app.sh` 会构建 release 版本、生成 `build/AutoKeyboard.app`，并自动做 ad-hoc 签名：
+
+```bash
+codesign --force --sign - build/AutoKeyboard.app
+```
+
+如果你有自己的 Developer ID 或 Apple Development 证书，也可以在打包后手动重新签名，再启动：
+
+```bash
+codesign --force --deep --sign "Developer ID Application: Your Name (TEAMID)" build/AutoKeyboard.app
+open build/AutoKeyboard.app
+```
+
+本机自用不要求 notarization；如果要分发给其他用户，建议使用 Developer ID 签名并 notarize。也可直接用 Xcode 打开 `Package.swift` 开发调试，但正式使用请按上面的方式打包签名后启动。
 
 ## 首次使用
 
-1. 启动后在 **系统设置 → 隐私与安全性 → 辅助功能** 中授权 AutoKeyboard。
-2. 点击菜单栏键盘图标 → 设置，确认英文/中文输入源选择正确（首次启动会自动猜测）。
-3. 在「应用规则」中为需要的应用添加规则；菜单栏中也可直接为当前应用快速设置模式。
+1. 先按「构建」步骤打包并签名，然后启动 `build/AutoKeyboard.app`。
+2. 在 **系统设置 → 隐私与安全性 → 辅助功能** 中授权 AutoKeyboard。
+3. 点击菜单栏键盘图标 → 设置，确认英文/中文输入源选择正确（首次启动会自动猜测）。
+4. 在「应用规则」中为需要的应用添加规则；菜单栏中也可直接为当前应用快速设置模式。
 
 ## 已知限制
 
 - 切换的是输入源整体，不是输入法内部的中英状态（系统限制）。
-- ad-hoc 签名：重新编译打包后可能需要在系统设置中重新授权辅助功能。
+- 辅助功能权限与应用签名相关：重新编译、重新打包或更换签名身份后，可能需要在系统设置中删除旧的 AutoKeyboard 授权项，再重新授权。
 - 智能模式依赖目标应用的辅助功能支持；部分应用（如某些 Electron 应用、Word 个别版本）暴露的文本信息有限时会回退到窗口标题判断。
 - 浏览器输入框打字过程中不会实时重判语言，仅在聚焦输入框/移动光标时判定。
