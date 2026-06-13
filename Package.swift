@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "AutoKeyboard",
             path: "Sources/AutoKeyboard"
+        ),
+        .testTarget(
+            name: "AutoKeyboardTests",
+            dependencies: ["AutoKeyboard"],
+            path: "Tests/AutoKeyboardTests"
         )
     ]
 )

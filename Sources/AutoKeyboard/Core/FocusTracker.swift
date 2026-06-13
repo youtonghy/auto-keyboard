@@ -177,6 +177,23 @@ enum AX {
         return value as? String
     }
 
+    static func copyStringLike(_ el: AXUIElement, _ attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, attribute as CFString, &value) == .success,
+              let value
+        else { return nil }
+        if let string = value as? String {
+            return string
+        }
+        if let attributed = value as? NSAttributedString {
+            return attributed.string
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return nil
+    }
+
     static func copyInt(_ el: AXUIElement, _ attribute: String) -> Int? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, attribute as CFString, &value) == .success else { return nil }

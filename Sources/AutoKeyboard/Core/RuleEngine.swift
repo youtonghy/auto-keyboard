@@ -57,12 +57,12 @@ final class RuleEngine {
             break
         }
 
-        // 2. 标题关键词（沿触发：仅匹配状态变化时动作）
-        if target == nil, let rule, !rule.keywordRules.isEmpty {
+        // 2. 上下文关键词（沿触发：仅匹配状态变化时动作）
+        let keywordTrigger = isFocusEntry || trigger == .titleChanged || (trigger == .selectionChanged && !manualOverride)
+        if target == nil, keywordTrigger, let rule, !rule.keywordRules.isEmpty {
             let key = focus.key.raw
-            let match = rule.keywordRules.first {
-                !$0.keyword.isEmpty && focus.windowTitle.localizedCaseInsensitiveContains($0.keyword)
-            }?.lang
+            let haystack = ContextDetector.keywordHaystack(element: focus.element, windowTitle: focus.windowTitle)
+            let match = KeywordMatcher.match(in: haystack, rules: rule.keywordRules)
             let previous = lastKeywordMatch[key]
             if match != previous {
                 if lastKeywordMatch.count > 1000 { lastKeywordMatch.removeAll() }
@@ -89,5 +89,13 @@ final class RuleEngine {
         if await sources.select(id: target) {
             memory.record(focus.key, sourceID: target)
         }
+    }
+}
+
+enum KeywordMatcher {
+    static func match(in haystack: String, rules: [KeywordRule]) -> LangChoice? {
+        rules.first {
+            !$0.keyword.isEmpty && haystack.localizedCaseInsensitiveContains($0.keyword)
+        }?.lang
     }
 }

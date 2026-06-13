@@ -8,6 +8,8 @@ Package.resolved
 # Local build output
 build/
 DerivedData/
+.build-test/
+.cache/
 
 # Xcode user state
 *.xcuserstate
