@@ -50,6 +50,7 @@ struct AppSettings: Codable {
     var defaultMode: AppMode = .memory
     var smartLearningEnabled = true
     var ocrAssistedDetection = false
+    var debugLogging = false
     var appRules: [AppRule] = []
 
     init(
@@ -59,6 +60,7 @@ struct AppSettings: Codable {
         defaultMode: AppMode = .memory,
         smartLearningEnabled: Bool = true,
         ocrAssistedDetection: Bool = false,
+        debugLogging: Bool = false,
         appRules: [AppRule] = []
     ) {
         self.enabled = enabled
@@ -67,6 +69,7 @@ struct AppSettings: Codable {
         self.defaultMode = defaultMode
         self.smartLearningEnabled = smartLearningEnabled
         self.ocrAssistedDetection = ocrAssistedDetection
+        self.debugLogging = debugLogging
         self.appRules = appRules
     }
 
@@ -77,6 +80,7 @@ struct AppSettings: Codable {
         case defaultMode
         case smartLearningEnabled
         case ocrAssistedDetection
+        case debugLogging
         case appRules
     }
 
@@ -88,6 +92,7 @@ struct AppSettings: Codable {
         defaultMode = try container.decodeIfPresent(AppMode.self, forKey: .defaultMode) ?? .memory
         smartLearningEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartLearningEnabled) ?? true
         ocrAssistedDetection = try container.decodeIfPresent(Bool.self, forKey: .ocrAssistedDetection) ?? false
+        debugLogging = try container.decodeIfPresent(Bool.self, forKey: .debugLogging) ?? false
         appRules = try container.decodeIfPresent([AppRule].self, forKey: .appRules) ?? []
     }
 }

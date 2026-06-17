@@ -8,11 +8,13 @@ final class AppCoordinator: ObservableObject {
     let tracker = FocusTracker()
     let memory = WindowStateStore()
     let smartLearning = SmartLearningStore()
+    let fileLogger = FileLogger()
     private lazy var engine = RuleEngine(
         settings: settings,
         sources: sources,
         memory: memory,
-        smartLearning: smartLearning
+        smartLearning: smartLearning,
+        fileLogger: fileLogger
     )
 
     @Published var axTrusted = false
@@ -45,6 +47,11 @@ final class AppCoordinator: ObservableObject {
 
         tracker.onFocusEvent = { [weak self] focus, trigger in
             self?.scheduleEvaluation(focus: focus, trigger: trigger)
+        }
+
+        tracker.onDebugLog = { [weak self] message in
+            guard let self, self.settings.value.debugLogging else { return }
+            self.fileLogger.log(message)
         }
 
         settings.onChange = { [weak self] in

@@ -43,6 +43,7 @@ final class FocusTracker: ObservableObject {
     private(set) var isSelfFrontmost = false
 
     var onFocusEvent: ((Focus, Trigger) -> Void)?
+    var onDebugLog: ((String) -> Void)?
 
     private var observer: AXObserver?
     private var appElement: AXUIElement?
@@ -91,6 +92,7 @@ final class FocusTracker: ObservableObject {
     }
 
     func handleAXNotification(_ name: String) {
+        onDebugLog?("ax-notify \(name)")
         switch name {
         case kAXMainWindowChangedNotification,
              kAXFocusedWindowChangedNotification:
@@ -124,6 +126,7 @@ final class FocusTracker: ObservableObject {
         for name in Self.subscribedNotifications {
             AXObserverAddNotification(obs, appEl, name as CFString, refcon)
         }
+        onDebugLog?("attach \(observedBundleID)")
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
     }
 

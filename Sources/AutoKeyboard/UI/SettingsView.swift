@@ -135,6 +135,28 @@ private struct GeneralTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("调试") {
+                Toggle("启用调试日志", isOn: $settings.value.debugLogging)
+                LabeledContent("日志文件") {
+                    Text(coordinator.fileLogger.logURL.path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Button("打开日志文件夹") {
+                        NSWorkspace.shared.open(coordinator.fileLogger.logURL.deletingLastPathComponent())
+                    }
+                    Spacer()
+                    Button("清空日志", role: .destructive) {
+                        coordinator.fileLogger.clear()
+                    }
+                }
+                Text("仅用于本机排障；会记录应用 bundleID、窗口标题与光标附近 OCR 文本，关闭后不再写入。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("启动") {
                 Toggle("登录时启动", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in

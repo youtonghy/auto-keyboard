@@ -13,29 +13,42 @@ enum AXGeometry {
     private static let minCaptureWidth: CGFloat = 320
     private static let maxCaptureWidth: CGFloat = 1200
 
-    /// 光标在屏幕上的矩形：优先选中范围 / 光标单字符的 bounds，退回焦点元素 bounds。
-    /// 仅靠窗口 bounds 无法定位光标，故不兜底（此时调用方应放弃 OCR）。
-    static func caretScreenRect(element: AXUIElement?) -> CGRect? {
-        guard let element else { return nil }
+    /// 光标定位结果：屏幕矩形 + 来源（用于调试日志）。
+    struct CaretLocation {
+        let rect: CGRect
+        let source: String
+    }
 
-        if let selection = AX.copyRange(element, kAXSelectedTextRangeAttribute as String) {
-            // 有选区：直接用选区范围的 bounds
-            if selection.length > 0,
-               let rect = AX.copyBoundsForRange(element, selection),
-               rect.width > 1, rect.height > 1 {
-                return rect
+    /// 光标在屏幕上的矩形：优先选中范围 / 光标单字符的 bounds，退回焦点元素 bounds，
+    /// 再退回窗口 bounds（无法精确到光标，但可整窗 OCR）。都取不到才返回 nil。
+    static func caretScreenRect(element: AXUIElement?, window: AXUIElement?) -> CaretLocation? {
+        if let element {
+            if let selection = AX.copyRange(element, kAXSelectedTextRangeAttribute as String) {
+                // 有选区：直接用选区范围的 bounds
+                if selection.length > 0,
+                   let rect = AX.copyBoundsForRange(element, selection),
+                   rect.width > 1, rect.height > 1 {
+                    return CaretLocation(rect: rect, source: "selection")
+                }
+                // 纯光标：探取光标处单字符的 bounds（高度≈行高）
+                let probe = CFRange(location: selection.location, length: 1)
+                if let rect = AX.copyBoundsForRange(element, probe), rect.height > 1 {
+                    return CaretLocation(rect: rect, source: "caret")
+                }
             }
-            // 纯光标：探取光标处单字符的 bounds（高度≈行高）
-            let probe = CFRange(location: selection.location, length: 1)
-            if let rect = AX.copyBoundsForRange(element, probe), rect.height > 1 {
-                return rect
+            // 退回：焦点元素整体 bounds
+            if let origin = AX.copyPosition(element),
+               let size = AX.copySize(element),
+               size.width > 1, size.height > 1 {
+                return CaretLocation(rect: CGRect(origin: origin, size: size), source: "element")
             }
         }
-        // 退回：焦点元素整体 bounds
-        if let origin = AX.copyPosition(element),
-           let size = AX.copySize(element),
+        // 最后兜底：窗口 bounds（无法定位光标，仅用于整窗 OCR）。
+        if let window,
+           let origin = AX.copyPosition(window),
+           let size = AX.copySize(window),
            size.width > 1, size.height > 1 {
-            return CGRect(origin: origin, size: size)
+            return CaretLocation(rect: CGRect(origin: origin, size: size), source: "window")
         }
         return nil
     }
