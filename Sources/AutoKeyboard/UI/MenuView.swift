@@ -24,6 +24,13 @@ struct MenuView: View {
         Divider()
 
         if let focus = tracker.lastFocus {
+            Text(ContextDetector.axCapability(
+                bundleID: focus.bundleID,
+                element: focus.element,
+                window: focus.window
+            ).label)
+            .foregroundStyle(.secondary)
+
             Menu("「\(focus.appName)」的模式") {
                 appModeButtons(for: focus)
             }

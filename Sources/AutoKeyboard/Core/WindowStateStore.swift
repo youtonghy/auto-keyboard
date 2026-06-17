@@ -1,7 +1,14 @@
 import Foundation
 
 @MainActor
-final class WindowStateStore {
+protocol WindowStateStoring: AnyObject {
+    func record(_ key: WindowKey, sourceID: String)
+    func lookup(_ key: WindowKey) -> String?
+    func clear()
+}
+
+@MainActor
+final class WindowStateStore: WindowStateStoring {
     private var map: [WindowKey: String] = [:]
     private var order: [WindowKey] = []
     private let capacity = 500

@@ -50,6 +50,7 @@ final class FocusTracker: ObservableObject {
     private var observedAppName = ""
 
     private static let subscribedNotifications: [String] = [
+        kAXMainWindowChangedNotification as String,
         kAXFocusedWindowChangedNotification as String,
         kAXFocusedUIElementChangedNotification as String,
         kAXTitleChangedNotification as String,
@@ -91,7 +92,8 @@ final class FocusTracker: ObservableObject {
 
     func handleAXNotification(_ name: String) {
         switch name {
-        case kAXFocusedWindowChangedNotification:
+        case kAXMainWindowChangedNotification,
+             kAXFocusedWindowChangedNotification:
             emit(.windowChanged)
         case kAXFocusedUIElementChangedNotification:
             emit(.elementChanged)
@@ -201,13 +203,29 @@ enum AX {
     }
 
     static func copyChildren(_ el: AXUIElement) -> [AXUIElement]? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &value) == .success,
-              let array = value as? [AnyObject]
-        else { return nil }
-        return array.compactMap {
-            CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil
+        let attributes = [
+            kAXChildrenAttribute as String,
+            "AXChildrenInNavigationOrder",
+            "AXContents",
+            "AXRows",
+        ]
+        var children: [AXUIElement] = []
+        var seen = Set<CFHashCode>()
+
+        for attribute in attributes {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, attribute as CFString, &value) == .success,
+                  let array = value as? [AnyObject]
+            else { continue }
+            for item in array where CFGetTypeID(item) == AXUIElementGetTypeID() {
+                let child = item as! AXUIElement
+                let hash = CFHash(child)
+                guard seen.insert(hash).inserted else { continue }
+                children.append(child)
+            }
         }
+
+        return children.isEmpty ? nil : children
     }
 
     static func copyRange(_ el: AXUIElement, _ attribute: String) -> CFRange? {

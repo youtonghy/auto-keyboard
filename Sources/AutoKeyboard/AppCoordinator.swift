@@ -7,7 +7,13 @@ final class AppCoordinator: ObservableObject {
     let sources = InputSourceManager()
     let tracker = FocusTracker()
     let memory = WindowStateStore()
-    private lazy var engine = RuleEngine(settings: settings, sources: sources, memory: memory)
+    let smartLearning = SmartLearningStore()
+    private lazy var engine = RuleEngine(
+        settings: settings,
+        sources: sources,
+        memory: memory,
+        smartLearning: smartLearning
+    )
 
     @Published var axTrusted = false
 
@@ -28,10 +34,11 @@ final class AppCoordinator: ObservableObject {
 
         sources.onUserChange = { [weak self] sourceID in
             guard let self else { return }
-            self.engine.noteManualSwitch()
-            if !self.tracker.isSelfFrontmost, let focus = self.tracker.lastFocus {
-                self.memory.record(focus.key, sourceID: sourceID)
-            }
+            self.evalTask?.cancel()
+            self.engine.noteManualSwitch(
+                sourceID: sourceID,
+                focus: self.tracker.isSelfFrontmost ? nil : self.tracker.lastFocus
+            )
         }
 
         tracker.onFocusEvent = { [weak self] focus, trigger in

@@ -47,12 +47,51 @@ struct AppSettings: Codable {
     var enabled = true
     var englishSourceID: String?
     var chineseSourceID: String?
+    var defaultMode: AppMode = .memory
+    var smartLearningEnabled = true
     var appRules: [AppRule] = []
+
+    init(
+        enabled: Bool = true,
+        englishSourceID: String? = nil,
+        chineseSourceID: String? = nil,
+        defaultMode: AppMode = .memory,
+        smartLearningEnabled: Bool = true,
+        appRules: [AppRule] = []
+    ) {
+        self.enabled = enabled
+        self.englishSourceID = englishSourceID
+        self.chineseSourceID = chineseSourceID
+        self.defaultMode = defaultMode
+        self.smartLearningEnabled = smartLearningEnabled
+        self.appRules = appRules
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case englishSourceID
+        case chineseSourceID
+        case defaultMode
+        case smartLearningEnabled
+        case appRules
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        englishSourceID = try container.decodeIfPresent(String.self, forKey: .englishSourceID)
+        chineseSourceID = try container.decodeIfPresent(String.self, forKey: .chineseSourceID)
+        defaultMode = try container.decodeIfPresent(AppMode.self, forKey: .defaultMode) ?? .memory
+        smartLearningEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartLearningEnabled) ?? true
+        appRules = try container.decodeIfPresent([AppRule].self, forKey: .appRules) ?? []
+    }
 }
 
 @MainActor
 final class SettingsStore: ObservableObject {
     private static let key = "settings.v1"
+    private let defaults: UserDefaults
+    private let storageKey: String
 
     @Published var value: AppSettings {
         didSet {
@@ -63,8 +102,10 @@ final class SettingsStore: ObservableObject {
 
     var onChange: (() -> Void)?
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: Self.key),
+    init(defaults: UserDefaults = .standard, key: String = SettingsStore.key) {
+        self.defaults = defaults
+        self.storageKey = key
+        if let data = defaults.data(forKey: key),
            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
             value = decoded
         } else {
@@ -86,7 +127,7 @@ final class SettingsStore: ObservableObject {
 
     private func save() {
         guard let data = try? JSONEncoder().encode(value) else { return }
-        UserDefaults.standard.set(data, forKey: Self.key)
+        defaults.set(data, forKey: storageKey)
     }
 
     private static func firstRunDefaults() -> AppSettings {

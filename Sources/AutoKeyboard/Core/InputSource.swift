@@ -8,7 +8,13 @@ struct InputSource: Identifiable, Hashable {
 }
 
 @MainActor
-final class InputSourceManager: ObservableObject {
+protocol InputSourceManaging: AnyObject {
+    var currentID: String { get }
+    func select(id: String) async -> Bool
+}
+
+@MainActor
+final class InputSourceManager: ObservableObject, InputSourceManaging {
     @Published private(set) var available: [InputSource] = []
     @Published private(set) var currentID: String = ""
 
