@@ -12,6 +12,7 @@ enum ContextKind: String, Hashable {
     case terminalShell
     case terminalAgent
     case normalTextInput
+    case ocrContext
     case unknown
 }
 
@@ -332,6 +333,13 @@ enum ContextDetector {
             return lang
         }
         return classify(windowTitle)
+    }
+
+    /// OCR 兜底判定：对屏幕识别到的「光标附近」文本复用汉字占比分类器。
+    /// 文本不足（classify 返回 nil）则返回 nil，不切换。
+    static func ocrDecision(text: String) -> ContextDecision? {
+        guard let lang = classify(text) else { return nil }
+        return ContextDecision(kind: .ocrContext, lang: lang, source: "ocr")
     }
 
     static func focusRegionIndex(in nodes: [FocusRegionNode]) -> Int? {

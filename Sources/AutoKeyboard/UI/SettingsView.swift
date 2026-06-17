@@ -45,6 +45,24 @@ private struct GeneralTab: View {
                 }
             }
 
+            Section("屏幕录制权限（OCR 兜底用）") {
+                HStack {
+                    Image(systemName: coordinator.screenCaptureTrusted ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(coordinator.screenCaptureTrusted ? .green : .red)
+                    Text(coordinator.screenCaptureTrusted
+                         ? "已授权，可对光标附近屏幕区域 OCR"
+                         : "未授权 — OCR 兜底不可用")
+                    Spacer()
+                    if !coordinator.screenCaptureTrusted {
+                        Button("请求授权") { Permissions.requestScreenCapturePrompt() }
+                        Button("打开系统设置") { Permissions.openScreenRecordingSettings() }
+                    }
+                }
+                Text("授权后通常需要重启 App 才会生效；重新编译打包（ad-hoc 签名变化）后可能需要再次授权。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("输入源") {
                 sourcePicker(title: "英文输入源", selection: Binding(
                     get: { settings.value.englishSourceID },
@@ -101,6 +119,18 @@ private struct GeneralTab: View {
                     .disabled(smartLearning.count == 0)
                 }
                 Text("仅在智能上下文模式中生效；记录组件指纹和中英文状态，不保存输入正文。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("OCR 辅助识别") {
+                Toggle("启用 OCR 兜底", isOn: $settings.value.ocrAssistedDetection)
+                if settings.value.ocrAssistedDetection, !coordinator.screenCaptureTrusted {
+                    Text("需先授予屏幕录制权限，并在授权后重启 App。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("当 AX 读不到光标附近文本（黑箱/无文本控件）时，截取光标附近屏幕区域，用本地 Vision OCR 判定中英文；不保存图像与正文。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

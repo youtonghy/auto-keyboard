@@ -247,4 +247,39 @@ enum AX {
         ) == .success else { return nil }
         return value as? String
     }
+
+    static func copyPosition(_ el: AXUIElement) -> CGPoint? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var point = CGPoint.zero
+        guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    static func copySize(_ el: AXUIElement) -> CGSize? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var size = CGSize.zero
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
+        return size
+    }
+
+    /// 指定字符范围在屏幕上的矩形（参数化属性 AXBoundsForRange）。
+    static func copyBoundsForRange(_ el: AXUIElement, _ range: CFRange) -> CGRect? {
+        var r = range
+        guard let rangeValue = AXValueCreate(.cfRange, &r) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            el, "AXBoundsForRange" as CFString, rangeValue, &value
+        ) == .success,
+            let value, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(value as! AXValue, .cgRect, &rect) else { return nil }
+        return rect
+    }
 }

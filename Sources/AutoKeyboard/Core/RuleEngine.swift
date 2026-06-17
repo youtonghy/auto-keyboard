@@ -22,6 +22,11 @@ final class RuleEngine {
     private var manualOverrideContextKind: ContextKind = .unknown
     private var manualOverrideWindowKey: String?
 
+    /// OCR 引擎与节流：OCR 较重，仅在 AX 取不到文本时兜底，并按最小间隔节流，避免连发光标事件刷爆。
+    private let ocrEngine = OCREngine()
+    private var lastOCRAt: Date?
+    private static let ocrMinInterval: TimeInterval = 0.5
+
     /// 调试日志：在 Console.app 中按 subsystem `com.autokeyboard` 过滤、开启"显示调试信息"即可看到
     /// 每次焦点事件的指纹输入与判定结果，用于核对指纹是否稳定。
     private let logger = Logger(subsystem: "com.autokeyboard", category: "smart")
@@ -224,6 +229,32 @@ final class RuleEngine {
             break
         }
 
+        // 3.5 OCR 兜底：AX 取不到光标附近文本（黑箱/无文本控件）时，用屏幕 OCR 判定。
+        // 仅在「开启 + 已授权屏幕录制 + AX 无语言结论 + 防抖触发 + 未手动接管 + 节流就绪」时运行；
+        // await 期间可能被 scheduleEvaluation 取消，恢复后丢弃过期结果。
+        if target == nil,
+           settings.value.ocrAssistedDetection,
+           Permissions.screenCaptureTrusted,
+           contextDecision?.lang == nil,
+           isSmartTrigger,
+           !manualOverride,
+           ocrCooldownReady() {
+            lastOCRAt = Date()
+            if let caretRect = AXGeometry.caretScreenRect(element: focus.element) {
+                let captureRect = AXGeometry.captureRect(around: caretRect)
+                let ocrText = await ocrEngine.recognize(caretScreenRect: caretRect, captureRect: captureRect)
+                if !Task.isCancelled,
+                   let ocrText,
+                   let decision = ContextDetector.ocrDecision(text: ocrText) {
+                    target = source(decision.lang == .chinese ? .chinese : .english)
+                    manualOverrideContextKind = decision.kind
+                    manualOverrideWindowKey = windowKey
+                    let langLabel = decision.lang == .chinese ? "中文" : (decision.lang == .english ? "英文" : "nil")
+                    logger.debug("ocr → \(langLabel, privacy: .public)")
+                }
+            }
+        }
+
         // 4. 记忆等非智能模式下也能识别终端；终端更适合按当前行/agent 状态实时判定，
         // 而不是记住一次性的窗口输入源。
         if target == nil,
@@ -265,11 +296,17 @@ final class RuleEngine {
 
     private func isStrongContext(_ kind: ContextKind) -> Bool {
         switch kind {
-        case .assistantChatInput, .terminalShell, .terminalAgent:
+        case .assistantChatInput, .terminalShell, .terminalAgent, .ocrContext:
             true
         case .normalTextInput, .unknown:
             false
         }
+    }
+
+    /// OCR 节流：距上次 OCR 是否已超过最小间隔。
+    private func ocrCooldownReady() -> Bool {
+        guard let last = lastOCRAt else { return true }
+        return Date().timeIntervalSince(last) >= Self.ocrMinInterval
     }
 }
 

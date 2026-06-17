@@ -26,5 +26,7 @@
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>用于在辅助功能无法读取光标附近文本时，对光标附近的屏幕区域进行本地 OCR 识别以判断中英文输入。</string>
 </dict>
 </plist>

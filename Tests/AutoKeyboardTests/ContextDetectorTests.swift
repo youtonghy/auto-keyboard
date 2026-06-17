@@ -12,6 +12,23 @@ final class ContextDetectorTests: XCTestCase {
         XCTAssertEqual(ContextDetector.classify("Hello world this is a test"), .english)
     }
 
+    func testOCRDecisionChineseText() {
+        let decision = ContextDetector.ocrDecision(text: "你好，这是一段中文")
+        XCTAssertEqual(decision?.kind, .ocrContext)
+        XCTAssertEqual(decision?.lang, .chinese)
+    }
+
+    func testOCRDecisionEnglishText() {
+        let decision = ContextDetector.ocrDecision(text: "Hello world this is English")
+        XCTAssertEqual(decision?.kind, .ocrContext)
+        XCTAssertEqual(decision?.lang, .english)
+    }
+
+    func testOCRDecisionInsufficientTextReturnsNil() {
+        XCTAssertNil(ContextDetector.ocrDecision(text: ""))
+        XCTAssertNil(ContextDetector.ocrDecision(text: "a"))
+    }
+
     func testPlaceholderChatSemanticUsesAssistantChatInput() {
         let decision = ContextDetector.detectDecision(
             bundleID: "com.example.chat",

@@ -21,6 +21,12 @@ struct MenuView: View {
             }
         }
 
+        if settings.value.ocrAssistedDetection, !coordinator.screenCaptureTrusted {
+            Button("⚠️ OCR 需屏幕录制权限，点击前往设置") {
+                Permissions.openScreenRecordingSettings()
+            }
+        }
+
         Divider()
 
         if let focus = tracker.lastFocus {

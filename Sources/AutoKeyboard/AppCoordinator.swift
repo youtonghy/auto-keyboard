@@ -16,6 +16,7 @@ final class AppCoordinator: ObservableObject {
     )
 
     @Published var axTrusted = false
+    @Published var screenCaptureTrusted = false
 
     private var evalTask: Task<Void, Never>?
     private var trustTimer: Timer?
@@ -25,6 +26,7 @@ final class AppCoordinator: ObservableObject {
         if !axTrusted {
             Permissions.requestAXPrompt()
         }
+        screenCaptureTrusted = Permissions.screenCaptureTrusted
 
         if settings.value.englishSourceID == nil || settings.value.chineseSourceID == nil {
             let guess = sources.guessDefaults()
@@ -67,6 +69,14 @@ final class AppCoordinator: ObservableObject {
             axTrusted = trusted
             if trusted {
                 tracker.reattachFrontmost()
+            }
+        }
+        let captureTrusted = Permissions.screenCaptureTrusted
+        if captureTrusted != screenCaptureTrusted {
+            screenCaptureTrusted = captureTrusted
+            // 授权后（通常需重启进程才生效）立刻重评一次，让 OCR 兜底有机会介入
+            if captureTrusted, let focus = tracker.lastFocus {
+                scheduleEvaluation(focus: focus, trigger: .appActivated)
             }
         }
     }

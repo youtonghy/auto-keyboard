@@ -49,6 +49,7 @@ struct AppSettings: Codable {
     var chineseSourceID: String?
     var defaultMode: AppMode = .memory
     var smartLearningEnabled = true
+    var ocrAssistedDetection = false
     var appRules: [AppRule] = []
 
     init(
@@ -57,6 +58,7 @@ struct AppSettings: Codable {
         chineseSourceID: String? = nil,
         defaultMode: AppMode = .memory,
         smartLearningEnabled: Bool = true,
+        ocrAssistedDetection: Bool = false,
         appRules: [AppRule] = []
     ) {
         self.enabled = enabled
@@ -64,6 +66,7 @@ struct AppSettings: Codable {
         self.chineseSourceID = chineseSourceID
         self.defaultMode = defaultMode
         self.smartLearningEnabled = smartLearningEnabled
+        self.ocrAssistedDetection = ocrAssistedDetection
         self.appRules = appRules
     }
 
@@ -73,6 +76,7 @@ struct AppSettings: Codable {
         case chineseSourceID
         case defaultMode
         case smartLearningEnabled
+        case ocrAssistedDetection
         case appRules
     }
 
@@ -83,6 +87,7 @@ struct AppSettings: Codable {
         chineseSourceID = try container.decodeIfPresent(String.self, forKey: .chineseSourceID)
         defaultMode = try container.decodeIfPresent(AppMode.self, forKey: .defaultMode) ?? .memory
         smartLearningEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartLearningEnabled) ?? true
+        ocrAssistedDetection = try container.decodeIfPresent(Bool.self, forKey: .ocrAssistedDetection) ?? false
         appRules = try container.decodeIfPresent([AppRule].self, forKey: .appRules) ?? []
     }
 }
