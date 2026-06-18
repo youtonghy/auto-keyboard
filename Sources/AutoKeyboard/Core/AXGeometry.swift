@@ -10,7 +10,7 @@ import CoreGraphics
 enum AXGeometry {
     /// 捕获区以光标为竖直中心、上下各扩展的行数。
     private static let bandHalfLines: CGFloat = 2.5
-    private static let minCaptureWidth: CGFloat = 320
+    private static let minCaptureWidth: CGFloat = 600
     private static let maxCaptureWidth: CGFloat = 1200
 
     /// 光标定位结果：屏幕矩形 + 来源（用于调试日志）。
@@ -19,9 +19,12 @@ enum AXGeometry {
         let source: String
     }
 
-    /// 光标在屏幕上的矩形：优先选中范围 / 光标单字符的 bounds，退回焦点元素 bounds，
-    /// 再退回窗口 bounds（无法精确到光标，但可整窗 OCR）。都取不到才返回 nil。
+    /// 光标在屏幕上的矩形，按优先级：
+    /// 选区/光标单字符 bounds → 尺寸合理的焦点元素（真实字段）→ 鼠标位置 → 大元素/窗口 bounds。
+    /// 黑箱应用里焦点元素往往没有几何或是个大容器，此时用「鼠标位置」作锚点
+    /// （用户点击/聚焦的输入框或终端行通常就在鼠标处），避免退化成整窗/整屏 OCR。
     static func caretScreenRect(element: AXUIElement?, window: AXUIElement?) -> CaretLocation? {
+        var elementBounds: CGRect?
         if let element {
             if let selection = AX.copyRange(element, kAXSelectedTextRangeAttribute as String) {
                 // 有选区：直接用选区范围的 bounds
@@ -36,14 +39,24 @@ enum AXGeometry {
                     return CaretLocation(rect: rect, source: "caret")
                 }
             }
-            // 退回：焦点元素整体 bounds
             if let origin = AX.copyPosition(element),
                let size = AX.copySize(element),
                size.width > 1, size.height > 1 {
-                return CaretLocation(rect: CGRect(origin: origin, size: size), source: "element")
+                elementBounds = CGRect(origin: origin, size: size)
+            }
+            // 元素是「真实字段」（尺寸合理）→ 最准，直接用。
+            if let bounds = elementBounds, bounds.height <= 200, bounds.width <= 900 {
+                return CaretLocation(rect: bounds, source: "element")
             }
         }
-        // 最后兜底：窗口 bounds（无法定位光标，仅用于整窗 OCR）。
+        // 鼠标位置兜底（CG 全局坐标，无需翻转）：黑箱/大容器场景下点击处≈输入位置。
+        if let mouse = CGEvent(source: nil)?.location {
+            return CaretLocation(rect: CGRect(origin: mouse, size: CGSize(width: 1, height: 1)), source: "mouse")
+        }
+        // 都不行：退回大元素 bounds，再退回窗口 bounds（仅用于粗略整区 OCR）。
+        if let bounds = elementBounds {
+            return CaretLocation(rect: bounds, source: "element-large")
+        }
         if let window,
            let origin = AX.copyPosition(window),
            let size = AX.copySize(window),
@@ -56,10 +69,10 @@ enum AXGeometry {
     /// 以光标为中心构造捕获矩形：竖直方向覆盖若干行（含「光标行 + 上方若干行」），
     /// 水平方向取光标宽度的若干倍并限幅，最后裁剪到显示器范围内。
     static func captureRect(around caretRect: CGRect) -> CGRect {
-        let lineHeight = max(caretRect.height, 16)
+        // lineHeight 上限避免兜底到窗口/大元素时把捕获带高撑成全屏。
+        let lineHeight = min(max(caretRect.height, 16), 36)
         let halfHeight = lineHeight * bandHalfLines
-        var width = caretRect.width * 4
-        width = min(max(width, minCaptureWidth), maxCaptureWidth)
+        let width = min(max(caretRect.width, minCaptureWidth), maxCaptureWidth)
 
         var rect = CGRect(
             x: caretRect.midX - width / 2,
