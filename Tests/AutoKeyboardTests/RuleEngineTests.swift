@@ -9,7 +9,7 @@ final class RuleEngineTests: XCTestCase {
     private let componentKey = SmartLearningKey(rawValue: "component")
 
     func testSmartModeLearnsFirstManualCorrectionAndRestoresIt() async {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .componentVisible)
         let focus = makeFocus()
 
         await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
@@ -22,7 +22,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testSecondManualSwitchInSameFocusEntryIsTransient() async {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .componentVisible)
         let focus = makeFocus()
 
         await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
@@ -33,7 +33,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testNextFocusEntryCanOverwriteLearnedValue() async {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .componentVisible)
         let focus = makeFocus()
 
         await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
@@ -45,7 +45,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testForceModeDoesNotLearn() {
-        let harness = makeHarness(defaultMode: .forceEnglish)
+        let harness = makeHarness(defaultMode: .forceEnglish, axCapability: .componentVisible)
 
         harness.engine.noteManualSwitch(sourceID: chineseSource, focus: makeFocus())
 
@@ -53,7 +53,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testNonConfiguredInputSourceDoesNotLearnOrPersistWindowMemory() {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .componentVisible)
         let focus = makeFocus()
 
         harness.engine.noteManualSwitch(sourceID: "emoji", focus: focus)
@@ -63,7 +63,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testLearnedHitSuppressesSelectionChangedSmartDetection() async {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .componentVisible)
         let focus = makeFocus(windowTitle: "English title")
         harness.smartLearning.record(componentKey, lang: .chinese)
 
@@ -76,7 +76,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testWindowSwitchViaElementChangedAppliesNewWindowMemory() async {
-        let harness = makeHarness(defaultMode: .memory)
+        let harness = makeHarness(defaultMode: .memory, axCapability: .componentVisible)
         let focusA = makeFocus(windowTitle: "win-a")
         let focusB = makeFocus(windowTitle: "win-b")
         harness.memory.record(focusB.key, sourceID: englishSource)
@@ -103,6 +103,8 @@ final class RuleEngineTests: XCTestCase {
                     defaultLang: .english
                 ),
             ]
+            ,
+            axCapability: .componentVisible
         )
         let focus = makeFocus(windowTitle: "win-a")
 
@@ -125,7 +127,7 @@ final class RuleEngineTests: XCTestCase {
                 mode: .smart,
                 defaultLang: .chinese
             ),
-        ])
+        ], axCapability: .blackBox)
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
 
         await harness.engine.evaluate(focus: focus, trigger: .appActivated)
@@ -134,7 +136,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testBlackBoxCodexWithoutMemoryOrDefaultDoesNotGuessChinese() async {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .blackBox)
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
         harness.sources.currentID = englishSource
 
@@ -145,7 +147,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testBlackBoxCodexRestoresWindowMemoryInSmartMode() async {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .blackBox)
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
         harness.memory.record(focus.key, sourceID: chineseSource)
 
@@ -154,8 +156,28 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
     }
 
+    func testSmartModeFallsBackToWindowMemoryWhenAXIsNotComponentVisible() async {
+        let harness = makeHarness(
+            appRules: [
+                AppRule(
+                    bundleID: "com.example.app",
+                    displayName: "Example",
+                    mode: .smart,
+                    defaultLang: .english
+                ),
+            ]
+            , axCapability: .textVisible
+        )
+        let focus = makeFocus(bundleID: "com.example.app", appName: "Example", windowTitle: "Test")
+        harness.memory.record(focus.key, sourceID: chineseSource)
+
+        await harness.engine.evaluate(focus: focus, trigger: .selectionChanged)
+
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
+    }
+
     func testBlackBoxCodexManualSwitchRecordsOnlyWindowMemory() {
-        let harness = makeHarness()
+        let harness = makeHarness(axCapability: .blackBox)
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
 
         harness.engine.noteManualSwitch(sourceID: chineseSource, focus: focus)
@@ -165,7 +187,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testTerminalContentChangeCanSwitchToEnglishInMemoryMode() async {
-        let harness = makeHarness(defaultMode: .memory)
+        let harness = makeHarness(defaultMode: .memory, axCapability: .componentVisible)
         let focus = makeFocus(bundleID: "com.apple.Terminal", appName: "Terminal", windowTitle: "Terminal")
         harness.sources.currentID = chineseSource
 
@@ -175,7 +197,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testContextKindSeparatesLearnedValues() async {
-        let harness = makeHarness(contextKeyedLearning: true)
+        let harness = makeHarness(contextKeyedLearning: true, axCapability: .componentVisible)
         let chatFocus = makeFocus(bundleID: "com.example.chat", appName: "Chat", windowTitle: "Chat input")
         let terminalFocus = makeFocus(bundleID: "com.apple.Terminal", appName: "Terminal", windowTitle: "Terminal")
 
@@ -203,6 +225,8 @@ final class RuleEngineTests: XCTestCase {
                     keywordRules: [KeywordRule(keyword: "codex", lang: .chinese)]
                 ),
             ]
+            ,
+            axCapability: .componentVisible
         )
         let shellFocus = makeFocus(bundleID: "com.apple.Terminal", appName: "Terminal", windowTitle: "Terminal")
         let agentFocus = makeFocus(bundleID: "com.apple.Terminal", appName: "Terminal", windowTitle: "codex")
@@ -221,7 +245,8 @@ final class RuleEngineTests: XCTestCase {
         defaultMode: AppMode = .smart,
         smartLearningEnabled: Bool = true,
         appRules: [AppRule] = [],
-        contextKeyedLearning: Bool = false
+        contextKeyedLearning: Bool = false,
+        axCapability: AXCapability = .blackBox
     ) -> Harness {
         let defaults = UserDefaults(suiteName: "RuleEngineTests.\(UUID().uuidString)")!
         let settings = SettingsStore(defaults: defaults, key: "settings")
@@ -244,7 +269,8 @@ final class RuleEngineTests: XCTestCase {
                 contextKeyedLearning
                     ? SmartLearningKey(rawValue: "component:\(contextKind.rawValue)")
                     : self.componentKey
-            }
+            },
+            axCapabilityForFocus: { _ in axCapability }
         )
         return Harness(
             engine: engine,

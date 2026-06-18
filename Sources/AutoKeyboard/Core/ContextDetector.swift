@@ -32,6 +32,12 @@ enum AXCapability: String, Hashable {
     }
 }
 
+extension AXCapability {
+    var canUseSmartLanguageJudgment: Bool {
+        self == .componentVisible
+    }
+}
+
 struct ContextDecision: Equatable {
     let kind: ContextKind
     let lang: DetectedLang?
@@ -301,17 +307,29 @@ enum ContextDetector {
         regionText: String?
     ) -> ContextDecision? {
         let line = text.map(currentLine)
-        let regionLine = currentLine(regionTail(regionText))
+        let regionTailText = regionTail(regionText)
+        let regionLine = currentLine(regionTailText)
         guard isTerminalContext(bundleID: bundleID, haystack: haystack, currentLine: line, regionLine: regionLine, regionText: regionText) else { return nil }
-        if let line, looksLikePromptLine(line), !containsTerminalAgentKeyword(line) {
+
+        // 代理型 AI 工具（Claude Code / Codex / OpenCode）判定优先于 shell 提示符短路，
+        // 否则 Claude Code 的 TUI 提示符（❯/$ 等）会被误判成普通 shell 而强制英文。
+        // 纯终端的窗口标题反映当前前台进程，计入代理检测范围；Electron 宿主（Codex/VSCode
+        // 桌面端、Claude Desktop 等）的标题只是应用外框，不得仅凭标题触发，只看屏幕正文。
+        // 注意 agentScope 用 line（仅光标所在行）而非整段 text，避免历史回滚里的 "codex"
+        // 误判，保留“退出 agent 回到 prompt → 英文”的语义。
+        let titleIsChrome = bundleID != nil && isElectronLikeHost(bundleID)
+        let agentScope = titleIsChrome
+            ? [regionTailText, line ?? ""].joined(separator: "\n")
+            : [haystack, regionTailText, line ?? ""].joined(separator: "\n")
+        if containsTerminalAgentKeyword(agentScope) {
+            return ContextDecision(kind: .terminalAgent, lang: .chinese, source: "terminal-agent")
+        }
+
+        if let line, looksLikePromptLine(line) {
             return ContextDecision(kind: .terminalShell, lang: .english, source: "terminal-prompt")
         }
-        if looksLikePromptLine(regionLine), !containsTerminalAgentKeyword(regionLine) {
+        if looksLikePromptLine(regionLine) {
             return ContextDecision(kind: .terminalShell, lang: .english, source: "terminal-region-prompt")
-        }
-        let agentHaystack = [haystack, regionTail(regionText), line ?? ""].joined(separator: "\n")
-        if containsTerminalAgentKeyword(agentHaystack) {
-            return ContextDecision(kind: .terminalAgent, lang: .chinese, source: "terminal-agent")
         }
         return ContextDecision(kind: .terminalShell, lang: .english, source: "terminal-shell")
     }

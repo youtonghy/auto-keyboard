@@ -80,7 +80,7 @@ private struct GeneralTab: View {
                     )
                     LabeledContent("应用", value: focus.appName)
                     LabeledContent("AX 状态", value: capability.label)
-                    Text("AX 黑盒应用只能使用窗口记忆或应用默认；不会进行组件级学习或上下文猜测。")
+                    Text("AX 黑盒或仅能看到弱文本的应用会回退到窗口记忆或应用默认；只有能读到真实输入组件语义的应用才启用智能语言判断。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -270,7 +270,7 @@ private struct AboutTab: View {
 
                 • 窗口记忆：记录每个窗口最后使用的输入源，切回窗口时自动恢复。
                 • 上下文关键词：窗口标题、当前焦点元素或父级区域命中关键词时切换（如终端运行 claude/codex，或编辑器侧栏聚焦到 AI 面板）；关键词消失后回到应用默认语言。
-                • 智能上下文：仅在应用通过 AX 暴露真实输入组件、placeholder、文本或父级语义时启用。优先参考输入框 placeholder/标题/描述，再看输入框正文、焦点区域、窗口可见内容和标题。终端 shell 默认英文，codex/claude/opencode 等 Agent 活跃区域默认中文。若 Electron 应用只暴露空 AXGroup（如部分 Codex Desktop 状态），会降级为窗口记忆/应用默认，不再硬猜具体输入框。手动纠正会按“应用+上下文类型+组件+标签”分桶学习；AX 黑盒时只记录窗口记忆，不保存输入正文。
+                • 智能上下文：仅在应用通过 AX 暴露真实输入组件语义时启用。优先参考输入框 placeholder/标题/描述，再看输入框正文、焦点区域、窗口可见内容和标题。终端 shell 默认英文，codex/claude/opencode 等 Agent 活跃区域默认中文。若应用只暴露空 AXGroup、弱文本或黑盒状态，会直接回退到窗口记忆/应用默认，不再硬猜具体输入框。手动纠正会按“应用+上下文类型+组件+标签”分桶学习；AX 黑盒和弱文本状态都不做组件级学习。
 
                 提示：重新编译打包后（ad-hoc 签名变化）可能需要在系统设置中重新授权辅助功能。
                 """)

@@ -223,6 +223,48 @@ final class ContextDetectorTests: XCTestCase {
         )
     }
 
+    func testClaudeCodeInGhosttyWithPromptCursorUsesTerminalAgent() {
+        // 回归：纯终端 (Ghostty) 内运行 Claude Code，标题含 "claude code"，
+        // 即便光标行是提示符形状 (❯)，也应识别为 terminalAgent → 中文。
+        let decision = ContextDetector.detectTerminalDecision(
+            bundleID: "com.mitchellh.ghostty",
+            haystack: "claude code — Ghostty",
+            text: "❯ ",
+            regionText: "Welcome to Claude Code\n> What would you like to do?"
+        )
+
+        XCTAssertEqual(decision?.kind, .terminalAgent)
+        XCTAssertEqual(decision?.lang, .chinese)
+        XCTAssertEqual(decision?.source, "terminal-agent")
+    }
+
+    func testClaudeCodeInGhosttyWithMultilinePromptCursorUsesChinese() {
+        // 光标文本含历史输出 + 末尾提示符，currentLine 为提示符；
+        // 标题 "claude code" 触发 agent 检测，不受提示符短路影响。
+        XCTAssertEqual(
+            ContextDetector.detectTerminalContext(
+                bundleID: "com.mitchellh.ghostty",
+                haystack: "claude code",
+                text: "some output\n❯ "
+            ),
+            .chinese
+        )
+    }
+
+    func testElectronHostTitleAloneDoesNotTriggerTerminalAgent() {
+        // 守护：Electron 宿主 (Codex 桌面端) 的窗口标题只是应用外框 (如 "Codex")，
+        // 不得仅凭标题里的 "codex" 就判为 terminalAgent；此处正文为普通 shell 提示符 → 英文。
+        let decision = ContextDetector.detectTerminalDecision(
+            bundleID: "com.openai.codex",
+            haystack: "Codex",
+            text: nil,
+            regionText: "macToolBox % "
+        )
+
+        XCTAssertEqual(decision?.kind, .terminalShell)
+        XCTAssertEqual(decision?.lang, .english)
+    }
+
     func testKeywordHaystackKeepsTitleFirstTruncatesAndDedupes() {
         let longTitle = String(repeating: "a", count: 600)
         let haystack = ContextDetector.keywordHaystack(

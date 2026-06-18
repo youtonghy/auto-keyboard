@@ -8,6 +8,7 @@ final class RuleEngine {
     private let memory: WindowStateStoring
     private let smartLearning: SmartLearningStoring
     private let smartKeyForFocus: (FocusTracker.Focus, ContextKind) -> SmartLearningKey?
+    private let axCapabilityForFocus: (FocusTracker.Focus) -> AXCapability
 
     /// 窗口当前生效的关键词匹配结果，用于只在“匹配状态变化”时切换，
     /// 避免标题频繁刷新时反复覆盖用户的手动选择
@@ -33,6 +34,13 @@ final class RuleEngine {
         smartLearning: SmartLearningStoring,
         smartKeyForFocus: @escaping (FocusTracker.Focus, ContextKind) -> SmartLearningKey? = {
             SmartLearningKeyBuilder.key(bundleID: $0.bundleID, element: $0.element, contextKind: $1)
+        },
+        axCapabilityForFocus: @escaping (FocusTracker.Focus) -> AXCapability = {
+            ContextDetector.axCapability(
+                bundleID: $0.bundleID,
+                element: $0.element,
+                window: $0.window
+            )
         }
     ) {
         self.settings = settings
@@ -40,6 +48,7 @@ final class RuleEngine {
         self.memory = memory
         self.smartLearning = smartLearning
         self.smartKeyForFocus = smartKeyForFocus
+        self.axCapabilityForFocus = axCapabilityForFocus
     }
 
     func noteManualSwitch(sourceID: String, focus: FocusTracker.Focus?) {
@@ -64,12 +73,9 @@ final class RuleEngine {
             window: focus.window,
             windowTitle: focus.windowTitle
         )
-        let capability = ContextDetector.axCapability(
-            bundleID: focus.bundleID,
-            element: focus.element,
-            window: focus.window
-        )
+        let capability = axCapabilityForFocus(focus)
         let contextKind = decision?.kind ?? .unknown
+        let smartJudgmentAvailable = capability.canUseSmartLanguageJudgment
         manualOverride = true
         manualOverrideContextKind = contextKind
         manualOverrideWindowKey = focus.key.raw
@@ -78,7 +84,7 @@ final class RuleEngine {
 
         guard mode == .smart,
               settings.value.smartLearningEnabled,
-              capability != .blackBox,
+              smartJudgmentAvailable,
               !learnedCurrentFocusEntry
         else { return }
 
@@ -106,11 +112,7 @@ final class RuleEngine {
         let windowKey = focus.key.raw
         let windowIdentityChanged = windowKey != lastWindowKey
         lastWindowKey = windowKey
-        let capability = ContextDetector.axCapability(
-            bundleID: focus.bundleID,
-            element: focus.element,
-            window: focus.window
-        )
+        let capability = axCapabilityForFocus(focus)
         let contextDecision = capability == .blackBox
             ? nil
             : ContextDetector.detectDecision(
@@ -120,6 +122,7 @@ final class RuleEngine {
                 windowTitle: focus.windowTitle
             )
         let contextKind = contextDecision?.kind ?? .unknown
+        let smartJudgmentAvailable = capability.canUseSmartLanguageJudgment
 
         let isWindowEntry = trigger == .appActivated
             || trigger == .windowChanged
@@ -134,7 +137,7 @@ final class RuleEngine {
             manualOverrideContextKind = contextKind
             learnedCurrentFocusEntry = false
             currentContextKind = contextKind
-            currentSmartKey = capability == .blackBox ? nil : smartKeyForFocus(focus, contextKind)
+            currentSmartKey = smartJudgmentAvailable ? smartKeyForFocus(focus, contextKind) : nil
         } else if trigger == .elementChanged {
             if contextKind != currentContextKind || manualOverrideWindowKey != windowKey {
                 manualOverride = false
@@ -145,20 +148,20 @@ final class RuleEngine {
             // 关键：不重置 manualOverride，避免 tab 到相邻字段就被自动检测盖掉用户刚选的语言。
             learnedCurrentFocusEntry = false
             currentContextKind = contextKind
-            currentSmartKey = capability == .blackBox ? nil : smartKeyForFocus(focus, contextKind)
+            currentSmartKey = smartJudgmentAvailable ? smartKeyForFocus(focus, contextKind) : nil
         } else if isContentChange, contextKind != currentContextKind {
             manualOverride = false
             manualOverrideWindowKey = nil
             manualOverrideContextKind = contextKind
             currentContextKind = contextKind
-            currentSmartKey = capability == .blackBox ? nil : smartKeyForFocus(focus, contextKind)
+            currentSmartKey = smartJudgmentAvailable ? smartKeyForFocus(focus, contextKind) : nil
         }
 
         let rule = settings.rule(for: focus.bundleID)
         let mode = rule?.mode ?? settings.value.defaultMode
 
         if isFocusEntry {
-            logger.debug("eval trig=\(self.triggerLabel(trigger), privacy: .public) mode=\(mode.rawValue, privacy: .public) override=\(self.manualOverride, privacy: .public) ax=\(capability.rawValue, privacy: .public) context=\(contextKind.rawValue, privacy: .public) source=\(contextDecision?.source ?? "nil", privacy: .public) \(SmartLearningKeyBuilder.trace(bundleID: focus.bundleID, element: focus.element, contextKind: contextKind), privacy: .public)")
+            logger.debug("eval trig=\(self.triggerLabel(trigger), privacy: .public) mode=\(mode.rawValue, privacy: .public) override=\(self.manualOverride, privacy: .public) ax=\(capability.rawValue, privacy: .public) smart=\(smartJudgmentAvailable, privacy: .public) context=\(contextKind.rawValue, privacy: .public) source=\(contextDecision?.source ?? "nil", privacy: .public) \(SmartLearningKeyBuilder.trace(bundleID: focus.bundleID, element: focus.element, contextKind: contextKind), privacy: .public)")
         }
 
         var target: String?
@@ -195,9 +198,7 @@ final class RuleEngine {
         // 3. 智能模式：先用 context kind 分桶学习，再用上下文建议。
         switch mode {
         case .smart:
-            if capability == .blackBox {
-                break
-            }
+            guard smartJudgmentAvailable else { break }
             // 智能判定在进入焦点时运行；对明确的上下文变化/内容变化也允许重判，
             // 这样 Codex 对话输入、终端 prompt、Agent 区域能随实际上下文切换。
             guard isSmartTrigger else { break }
@@ -224,6 +225,8 @@ final class RuleEngine {
             break
         }
 
+        let smartModeFallsBackToMemory = mode == .smart && !smartJudgmentAvailable
+
         // 4. 记忆等非智能模式下也能识别终端；终端更适合按当前行/agent 状态实时判定，
         // 而不是记住一次性的窗口输入源。
         if target == nil,
@@ -237,8 +240,10 @@ final class RuleEngine {
             manualOverrideWindowKey = windowKey
         }
 
-        // 5. 窗口记忆 / 应用默认（仅在进入窗口时恢复，避免与窗口内手动切换冲突）
-        if target == nil, isWindowEntry {
+        // 5. 窗口记忆 / 应用默认：
+        // 智能模式在 AX 读不到真实上下文时直接回退到窗口记忆；
+        // 其余模式仍只在进入窗口时恢复，避免与窗口内手动切换冲突。
+        if target == nil, isWindowEntry || smartModeFallsBackToMemory {
             target = memory.lookup(focus.key) ?? (rule?.defaultLang).map(source)
         }
 
