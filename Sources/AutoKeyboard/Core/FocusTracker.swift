@@ -25,6 +25,8 @@ final class FocusTracker: ObservableObject {
         let window: AXUIElement?
         let windowTitle: String
         let element: AXUIElement?
+        let hitElement: AXUIElement?
+        let focusPoint: CGPoint?
 
         var key: WindowKey {
             WindowKey(bundleID: bundleID, window: window, title: windowTitle)
@@ -37,6 +39,7 @@ final class FocusTracker: ObservableObject {
         case elementChanged
         case titleChanged
         case selectionChanged
+        case valueChanged
     }
 
     @Published private(set) var lastFocus: Focus?
@@ -49,6 +52,11 @@ final class FocusTracker: ObservableObject {
     private var appElement: AXUIElement?
     private var observedBundleID = ""
     private var observedAppName = ""
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
+    private var lastMouseDownPoint: CGPoint?
+    private var lastMouseDownAt: Date?
+    private static let clickIntentTTL: TimeInterval = 0.9
 
     private static let subscribedNotifications: [String] = [
         kAXMainWindowChangedNotification as String,
@@ -59,6 +67,7 @@ final class FocusTracker: ObservableObject {
     ]
 
     func start() {
+        installMouseMonitors()
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(appActivated(_:)),
@@ -103,6 +112,8 @@ final class FocusTracker: ObservableObject {
             emit(.titleChanged)
         case kAXSelectedTextChangedNotification:
             emit(.selectionChanged)
+        case kAXValueChangedNotification:
+            emit(.valueChanged)
         default:
             break
         }
@@ -148,20 +159,62 @@ final class FocusTracker: ObservableObject {
         var window: AXUIElement?
         var title = ""
         var element: AXUIElement?
+        var hitElement: AXUIElement?
+        let focusPoint = freshMouseDownPoint()
         if let appEl = appElement {
             window = AX.copyElement(appEl, kAXFocusedWindowAttribute)
             if let window {
                 title = AX.copyString(window, kAXTitleAttribute) ?? ""
             }
             element = AX.copyElement(appEl, kAXFocusedUIElementAttribute)
+            if let focusPoint {
+                hitElement = AX.elementAtPosition(appEl, focusPoint)
+            }
         }
         return Focus(
             bundleID: observedBundleID,
             appName: observedAppName,
             window: window,
             windowTitle: title,
-            element: element
+            element: element,
+            hitElement: hitElement,
+            focusPoint: focusPoint
         )
+    }
+
+    private func installMouseMonitors() {
+        guard globalMouseMonitor == nil, localMouseMonitor == nil else { return }
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            self?.recordMouseDown()
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            self?.recordMouseDown()
+            return event
+        }
+    }
+
+    private func removeMouseMonitors() {
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+        }
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+        }
+        globalMouseMonitor = nil
+        localMouseMonitor = nil
+    }
+
+    private func recordMouseDown() {
+        lastMouseDownPoint = NSEvent.mouseLocation
+        lastMouseDownAt = Date()
+    }
+
+    private func freshMouseDownPoint() -> CGPoint? {
+        guard let point = lastMouseDownPoint,
+              let at = lastMouseDownAt,
+              Date().timeIntervalSince(at) <= Self.clickIntentTTL
+        else { return nil }
+        return point
     }
 }
 
@@ -174,6 +227,14 @@ enum AX {
               let value, CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
         return (value as! AXUIElement)
+    }
+
+    static func elementAtPosition(_ app: AXUIElement, _ point: CGPoint) -> AXUIElement? {
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &element) == .success else {
+            return nil
+        }
+        return element
     }
 
     static func copyString(_ el: AXUIElement, _ attribute: String) -> String? {

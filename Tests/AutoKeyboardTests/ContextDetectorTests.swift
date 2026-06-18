@@ -240,6 +240,31 @@ final class ContextDetectorTests: XCTestCase {
         )
     }
 
+    func testClaudeCodeInGhosttyWithPromptCursorUsesTerminalAgent() {
+        let decision = ContextDetector.detectTerminalDecision(
+            bundleID: "com.mitchellh.ghostty",
+            haystack: "claude code — Ghostty",
+            text: "❯ ",
+            regionText: "Welcome to Claude Code\n> What would you like to do?"
+        )
+
+        XCTAssertEqual(decision?.kind, .terminalAgent)
+        XCTAssertEqual(decision?.lang, .chinese)
+        XCTAssertEqual(decision?.source, "terminal-agent")
+    }
+
+    func testElectronHostTitleAloneDoesNotTriggerTerminalAgent() {
+        let decision = ContextDetector.detectTerminalDecision(
+            bundleID: "com.openai.codex",
+            haystack: "Codex",
+            text: nil,
+            regionText: "macToolBox % "
+        )
+
+        XCTAssertEqual(decision?.kind, .terminalShell)
+        XCTAssertEqual(decision?.lang, .english)
+    }
+
     func testKeywordHaystackKeepsTitleFirstTruncatesAndDedupes() {
         let longTitle = String(repeating: "a", count: 600)
         let haystack = ContextDetector.keywordHaystack(
@@ -297,7 +322,7 @@ final class ContextDetectorTests: XCTestCase {
         )
     }
 
-    func testAXCapabilityTreatsWindowTextAsTextVisible() {
+    func testAXCapabilityTreatsElectronWindowTextAsWeakTextVisible() {
         XCTAssertEqual(
             ContextDetector.axCapability(
                 bundleID: "com.openai.codex",
@@ -307,7 +332,21 @@ final class ContextDetectorTests: XCTestCase {
                 windowText: "project % ",
                 hasElement: false
             ),
-            .textVisible
+            .textVisibleWeak
+        )
+    }
+
+    func testAXCapabilityTreatsNativeWindowTextAsStrongTextVisible() {
+        XCTAssertEqual(
+            ContextDetector.axCapability(
+                bundleID: "com.example.app",
+                elementNodes: [],
+                cursorText: nil,
+                regionText: nil,
+                windowText: "project % ",
+                hasElement: false
+            ),
+            .textVisibleStrong
         )
     }
 

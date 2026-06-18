@@ -8,6 +8,8 @@ final class RuleEngine {
     private let memory: WindowStateStoring
     private let smartLearning: SmartLearningStoring
     private let smartKeyForFocus: (FocusTracker.Focus, ContextKind) -> SmartLearningKey?
+    private let capabilityForFocus: (FocusTracker.Focus) -> AXCapability
+    private let decisionForFocus: (FocusTracker.Focus, AXCapability) -> ContextDecision?
     private let fileLogger: FileLogger
 
     /// 窗口当前生效的关键词匹配结果，用于只在“匹配状态变化”时切换，
@@ -22,10 +24,15 @@ final class RuleEngine {
     private var currentContextKind: ContextKind = .unknown
     private var manualOverrideContextKind: ContextKind = .unknown
     private var manualOverrideWindowKey: String?
+    private var lastClickPoint: CGPoint?
+    private var lastClickAt: Date?
+    private var lastClickWindowKey: String?
+    private static let clickIntentTTL: TimeInterval = 0.9
 
     /// OCR 引擎与节流：OCR 较重，仅在 AX 取不到文本时兜底，并按最小间隔节流，避免连发光标事件刷爆。
     private let ocrEngine = OCREngine()
     private var lastOCRAt: Date?
+    private var lastOCRAnchor: String?
     private static let ocrMinInterval: TimeInterval = 0.5
 
     /// 调试日志：在 Console.app 中按 subsystem `com.autokeyboard` 过滤、开启"显示调试信息"即可看到
@@ -40,6 +47,18 @@ final class RuleEngine {
         smartKeyForFocus: @escaping (FocusTracker.Focus, ContextKind) -> SmartLearningKey? = {
             SmartLearningKeyBuilder.key(bundleID: $0.bundleID, element: $0.element, contextKind: $1)
         },
+        capabilityForFocus: @escaping (FocusTracker.Focus) -> AXCapability = {
+            ContextDetector.axCapability(bundleID: $0.bundleID, element: $0.element, window: $0.window)
+        },
+        decisionForFocus: @escaping (FocusTracker.Focus, AXCapability) -> ContextDecision? = { focus, capability in
+            guard capability != .blackBox else { return nil }
+            return ContextDetector.detectDecision(
+                bundleID: focus.bundleID,
+                element: focus.element,
+                window: focus.window,
+                windowTitle: focus.windowTitle
+            )
+        },
         fileLogger: FileLogger = FileLogger()
     ) {
         self.settings = settings
@@ -47,6 +66,8 @@ final class RuleEngine {
         self.memory = memory
         self.smartLearning = smartLearning
         self.smartKeyForFocus = smartKeyForFocus
+        self.capabilityForFocus = capabilityForFocus
+        self.decisionForFocus = decisionForFocus
         self.fileLogger = fileLogger
     }
 
@@ -66,23 +87,19 @@ final class RuleEngine {
             return
         }
 
-        let decision = ContextDetector.detectDecision(
-            bundleID: focus.bundleID,
-            element: focus.element,
-            window: focus.window,
-            windowTitle: focus.windowTitle
-        )
-        let capability = ContextDetector.axCapability(
-            bundleID: focus.bundleID,
-            element: focus.element,
-            window: focus.window
-        )
+        let capability = capabilityForFocus(focus)
+        let decision = decisionForFocus(focus, capability)
         let contextKind = decision?.kind ?? .unknown
         manualOverride = true
         manualOverrideContextKind = contextKind
         manualOverrideWindowKey = focus.key.raw
 
         memory.record(focus.key, sourceID: sourceID)
+        if let point = focus.focusPoint {
+            lastClickPoint = point
+            lastClickAt = Date()
+            lastClickWindowKey = focus.key.raw
+        }
 
         guard mode == .smart,
               settings.value.smartLearningEnabled,
@@ -114,31 +131,18 @@ final class RuleEngine {
         let windowKey = focus.key.raw
         let windowIdentityChanged = windowKey != lastWindowKey
         lastWindowKey = windowKey
-        let capability = ContextDetector.axCapability(
-            bundleID: focus.bundleID,
-            element: focus.element,
-            window: focus.window
-        )
-        let contextDecision = capability == .blackBox
-            ? nil
-            : ContextDetector.detectDecision(
-                bundleID: focus.bundleID,
-                element: focus.element,
-                window: focus.window,
-                windowTitle: focus.windowTitle
-            )
+        let capability = capabilityForFocus(focus)
+        let contextDecision = decisionForFocus(focus, capability)
         let contextKind = contextDecision?.kind ?? .unknown
-        // AX 是否拿不到「光标附近」文本：决策为 nil（黑箱），或只能从窗口正文/标题（边框）分类。
-        // OCR 兜底据此触发，并优先于这类弱 AX 结论。
-        let axDecisionIsWeak = contextDecision == nil
-            || contextDecision?.source == "window-text"
-            || contextDecision?.source == "window-title"
+        let axDecisionIsWeak = capability.prefersOCRInSmartMode
+        let clickIntent = clickIntent(for: focus)
+        let inputIntent = inputIntent(for: focus, clickIntent: clickIntent)
 
         let isWindowEntry = trigger == .appActivated
             || trigger == .windowChanged
             || (trigger == .elementChanged && windowIdentityChanged)
         let isFocusEntry = isWindowEntry || trigger == .elementChanged
-        let isContentChange = trigger == .titleChanged || trigger == .selectionChanged
+        let isContentChange = trigger == .titleChanged || trigger == .selectionChanged || trigger == .valueChanged
         let isSmartTrigger = isFocusEntry || isContentChange
         if isWindowEntry {
             // 进入新窗口/应用：完全重置，恢复自动判定
@@ -175,7 +179,7 @@ final class RuleEngine {
         }
 
         if isSmartTrigger {
-            debugLog("eval trig=\(triggerLabel(trigger)) bundle=\(focus.bundleID) title=\"\(focus.windowTitle)\" ax=\(capability.rawValue) ctxSrc=\(contextDecision?.source ?? "nil") ctxLang=\(langLabel(contextDecision?.lang)) weak=\(axDecisionIsWeak) override=\(manualOverride) mode=\(mode.rawValue) cur=\(sources.currentID)")
+            debugLog("eval trig=\(triggerLabel(trigger)) bundle=\(focus.bundleID) title=\"\(focus.windowTitle)\" ax=\(capability.rawValue) ctxSrc=\(contextDecision?.source ?? "nil") ctxLang=\(langLabel(contextDecision?.lang)) weak=\(axDecisionIsWeak) input=\(inputIntentLabel(inputIntent)) override=\(manualOverride) mode=\(mode.rawValue) cur=\(sources.currentID)")
         }
 
         var target: String?
@@ -190,9 +194,9 @@ final class RuleEngine {
             break
         }
 
-        // 2. 上下文关键词。显式规则是用户配置的强信号，不受 manualOverride 阻挡。
         let keywordTrigger = isFocusEntry || trigger == .titleChanged || trigger == .selectionChanged
-        if target == nil, keywordTrigger, let rule, !rule.keywordRules.isEmpty {
+        func keywordTarget() -> String? {
+            guard keywordTrigger, let rule, !rule.keywordRules.isEmpty else { return nil }
             let key = focus.key.raw
             let haystack = ContextDetector.keywordHaystack(element: focus.element, windowTitle: focus.windowTitle)
             let match = KeywordMatcher.match(in: haystack, rules: rule.keywordRules)
@@ -201,99 +205,111 @@ final class RuleEngine {
                 if lastKeywordMatch.count > 1000 { lastKeywordMatch.removeAll() }
                 lastKeywordMatch[key] = match
                 if let match {
-                    target = source(match)
+                    return source(match)
                 } else if previous != nil, let def = rule.defaultLang {
                     // 关键词消失（如 claude/codex 退出）→ 回到应用默认
-                    target = source(def)
+                    return source(def)
                 }
             }
+            return nil
         }
 
-        // 2.5 OCR 兜底：AX 读不到光标附近文本（黑箱/弱判定）时用屏幕 OCR，成功则优先于弱 AX 结论。
-        // await 期间可能被 scheduleEvaluation 取消，恢复后丢弃过期结果。
-        if target == nil, settings.value.ocrAssistedDetection {
+        func learnedTarget() -> String? {
+            guard isFocusEntry,
+                  settings.value.smartLearningEnabled,
+                  let key = currentSmartKey,
+                  let learned = smartLearning.lookup(key)
+            else { return nil }
+            manualOverrideContextKind = contextKind
+            manualOverrideWindowKey = windowKey
+            return source(learned)
+        }
+
+        func detectedTarget() -> String? {
+            guard !manualOverride,
+                  (isFocusEntry || isStrongContext(contextKind)),
+                  let detected = contextDecision?.lang
+            else { return nil }
+            manualOverrideContextKind = contextKind
+            manualOverrideWindowKey = windowKey
+            return source(detected == .chinese ? .chinese : .english)
+        }
+
+        func ocrTarget() async -> String? {
+            guard settings.value.ocrAssistedDetection else { return nil }
             if !Permissions.screenCaptureTrusted {
                 debugLog("ocr skip: screen capture not trusted")
-            } else if !axDecisionIsWeak {
-                debugLog("ocr skip: ax decision not weak (source=\(contextDecision?.source ?? "nil"))")
-            } else if !isSmartTrigger {
-                debugLog("ocr skip: not a smart trigger")
-            } else if manualOverride {
-                debugLog("ocr skip: manual override active")
-            } else if !ocrCooldownReady() {
-                debugLog("ocr skip: cooldown")
-            } else {
-                lastOCRAt = Date()
-                if let caret = AXGeometry.caretScreenRect(element: focus.element, window: focus.window) {
-                    let captureRect = AXGeometry.captureRect(around: caret.rect)
-                    debugLog("ocr run: caretSrc=\(caret.source) caretRect=\(String(describing: caret.rect)) capture=\(String(describing: captureRect))")
-                    let ocrText = await ocrEngine.recognize(caretScreenRect: caret.rect, captureRect: captureRect)
-                    if Task.isCancelled {
-                        debugLog("ocr cancelled")
-                    } else if let ocrText {
-                        let preview = ocrText.replacingOccurrences(of: "\n", with: " ⏎ ")
-                        let decision = ContextDetector.ocrDecision(text: ocrText)
-                        debugLog("ocr text(\(ocrText.count))=\"\(preview.prefix(120))\" decision=\(langLabel(decision?.lang))")
-                        if let decision {
-                            target = source(decision.lang == .chinese ? .chinese : .english)
-                            manualOverrideContextKind = decision.kind
-                            manualOverrideWindowKey = windowKey
-                        }
-                    } else {
-                        debugLog("ocr returned no text")
-                    }
-                } else {
-                    debugLog("ocr skip: caretScreenRect nil (no element/window bounds)")
-                }
+                return nil
             }
+            if !isSmartTrigger {
+                debugLog("ocr skip: not a smart trigger")
+                return nil
+            }
+            if manualOverride {
+                debugLog("ocr skip: manual override active")
+                return nil
+            }
+            guard shouldAllowOCR(capability: capability, trigger: trigger, inputIntent: inputIntent) else {
+                debugLog("ocr skip: input-intent gate blocked")
+                return nil
+            }
+            guard let caret = AXGeometry.caretScreenRect(
+                element: focus.element,
+                hitElement: focus.hitElement,
+                focusPoint: focus.focusPoint,
+                window: focus.window
+            ) else {
+                debugLog("ocr skip: caretScreenRect nil (no element/window bounds)")
+                return nil
+            }
+            let anchor = ocrAnchor(windowKey: windowKey, caret: caret.rect)
+            guard ocrCooldownReady(anchor: anchor) else {
+                debugLog("ocr skip: cooldown")
+                return nil
+            }
+            lastOCRAt = Date()
+            lastOCRAnchor = anchor
+            let captureRect = AXGeometry.captureRect(around: caret.rect)
+            debugLog("ocr run: caretSrc=\(caret.source) caretRect=\(String(describing: caret.rect)) capture=\(String(describing: captureRect))")
+            let ocrText = await ocrEngine.recognize(caretScreenRect: caret.rect, captureRect: captureRect)
+            if Task.isCancelled {
+                debugLog("ocr cancelled")
+                return nil
+            }
+            guard let ocrText else {
+                debugLog("ocr returned no text")
+                return nil
+            }
+            let preview = ocrText.replacingOccurrences(of: "\n", with: " ⏎ ")
+            let decision = ContextDetector.ocrDecision(text: ocrText)
+            debugLog("ocr text(\(ocrText.count))=\"\(preview.prefix(120))\" decision=\(langLabel(decision?.lang))")
+            guard let decision else { return nil }
+            manualOverrideContextKind = decision.kind
+            manualOverrideWindowKey = windowKey
+            return source(decision.lang == .chinese ? .chinese : .english)
         }
 
-        // 3. 智能模式：先用 context kind 分桶学习，再用上下文建议。
+        // 2. 上下文关键词。非智能模式仍保留显式关键词规则；智能模式在下方按指定顺序处理。
+        if target == nil, mode != .smart {
+            target = keywordTarget()
+        }
+
+        // 3. 智能模式：AX 可读时 学习 > 关键词 > 识别；黑盒应用直接 OCR。
         switch mode {
         case .smart:
-            if capability == .blackBox {
-                break
-            }
-            // 智能判定在进入焦点时运行；对明确的上下文变化/内容变化也允许重判，
-            // 这样 Codex 对话输入、终端 prompt、Agent 区域能随实际上下文切换。
             guard isSmartTrigger else { break }
-            if target == nil,
-               isFocusEntry,
-               settings.value.smartLearningEnabled,
-               let key = currentSmartKey,
-               let learned = smartLearning.lookup(key) {
-                // 已学值优先级最高：用户曾为该组件纠正过的语言直接恢复
-                target = source(learned)
-                manualOverrideContextKind = contextKind
-                manualOverrideWindowKey = windowKey
-            } else if target == nil,
-                      !manualOverride,
-                      (isFocusEntry || isStrongContext(contextKind)),
-                      let detected = contextDecision?.lang {
-                // 无已学值且用户未在本窗口手动接管：按上下文判定一次并"提交"为本窗口的生效选择
-                target = source(detected == .chinese ? .chinese : .english)
-                manualOverrideContextKind = contextKind
-                manualOverrideWindowKey = windowKey
+            if shouldUseOCR(capability: capability, trigger: trigger, inputIntent: inputIntent) {
+                target = await ocrTarget()
+            } else {
+                target = learnedTarget()
+                    ?? keywordTarget()
+                    ?? detectedTarget()
             }
-            // 否则（用户已手动接管）保持当前输入源，不与用户争抢
         default:
             break
         }
 
-        // 4. 记忆等非智能模式下也能识别终端；终端更适合按当前行/agent 状态实时判定，
-        // 而不是记住一次性的窗口输入源。
-        if target == nil,
-           mode == .memory,
-           isSmartTrigger,
-           !manualOverride,
-           let terminalLang = contextDecision?.lang,
-           contextKind == .terminalShell || contextKind == .terminalAgent {
-            target = source(terminalLang == .chinese ? .chinese : .english)
-            manualOverrideContextKind = contextKind
-            manualOverrideWindowKey = windowKey
-        }
-
-        // 5. 窗口记忆 / 应用默认（仅在进入窗口时恢复，避免与窗口内手动切换冲突）
+        // 4. 窗口记忆 / 应用默认（仅在进入窗口时恢复，避免与窗口内手动切换冲突）
         if target == nil, isWindowEntry {
             target = memory.lookup(focus.key) ?? (rule?.defaultLang).map(source)
         }
@@ -318,6 +334,7 @@ final class RuleEngine {
         case .elementChanged: "elem"
         case .titleChanged: "title"
         case .selectionChanged: "sel"
+        case .valueChanged: "value"
         }
     }
 
@@ -330,10 +347,18 @@ final class RuleEngine {
         }
     }
 
-    /// OCR 节流：距上次 OCR 是否已超过最小间隔。
-    private func ocrCooldownReady() -> Bool {
+    /// OCR 节流：同一窗口同一锚点短时间内跳过；不同点击点不互相压制。
+    private func ocrCooldownReady(anchor: String) -> Bool {
         guard let last = lastOCRAt else { return true }
+        guard lastOCRAnchor == anchor else { return true }
         return Date().timeIntervalSince(last) >= Self.ocrMinInterval
+    }
+
+    private func ocrAnchor(windowKey: String, caret: CGRect) -> String {
+        let bucket: CGFloat = 24
+        let x = Int((caret.midX / bucket).rounded())
+        let y = Int((caret.midY / bucket).rounded())
+        return "\(windowKey)|\(x)|\(y)"
     }
 
     /// 文件调试日志（仅在设置中开启「调试日志」时写入）。
@@ -348,6 +373,56 @@ final class RuleEngine {
         case .english: "英文"
         case .none: "nil"
         }
+    }
+
+    private enum InputIntent {
+        case input
+        case nonInput
+        case unknown
+    }
+
+    private func clickIntent(for focus: FocusTracker.Focus) -> Bool {
+        guard let lastClickAt,
+              let lastClickWindowKey,
+              lastClickWindowKey == focus.key.raw,
+              Date().timeIntervalSince(lastClickAt) <= Self.clickIntentTTL,
+              lastClickPoint != nil
+        else { return false }
+        return true
+    }
+
+    private func inputIntent(for focus: FocusTracker.Focus, clickIntent: Bool) -> InputIntent {
+        guard clickIntent else { return .unknown }
+        guard let hitElement = focus.hitElement else { return .unknown }
+        guard let explicit = ContextDetector.isClickInputCandidate(element: hitElement) else { return .unknown }
+        return explicit ? .input : .nonInput
+    }
+
+    private func inputIntentLabel(_ intent: InputIntent) -> String {
+        switch intent {
+        case .input: "input"
+        case .nonInput: "non-input"
+        case .unknown: "unknown"
+        }
+    }
+
+    private func shouldAllowOCR(capability: AXCapability, trigger: FocusTracker.Trigger, inputIntent: InputIntent) -> Bool {
+        if inputIntent == .input {
+            return true
+        }
+        guard capability.prefersOCRInSmartMode else { return false }
+        switch inputIntent {
+        case .input:
+            return true
+        case .nonInput:
+            return false
+        case .unknown:
+            return trigger == .selectionChanged || trigger == .valueChanged
+        }
+    }
+
+    private func shouldUseOCR(capability: AXCapability, trigger: FocusTracker.Trigger, inputIntent: InputIntent) -> Bool {
+        shouldAllowOCR(capability: capability, trigger: trigger, inputIntent: inputIntent)
     }
 }
 

@@ -9,7 +9,7 @@ final class RuleEngineTests: XCTestCase {
     private let componentKey = SmartLearningKey(rawValue: "component")
 
     func testSmartModeLearnsFirstManualCorrectionAndRestoresIt() async {
-        let harness = makeHarness()
+        let harness = makeHarness(smartKey: .component)
         let focus = makeFocus()
 
         await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
@@ -22,7 +22,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testSecondManualSwitchInSameFocusEntryIsTransient() async {
-        let harness = makeHarness()
+        let harness = makeHarness(smartKey: .component)
         let focus = makeFocus()
 
         await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
@@ -33,7 +33,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testNextFocusEntryCanOverwriteLearnedValue() async {
-        let harness = makeHarness()
+        let harness = makeHarness(smartKey: .component)
         let focus = makeFocus()
 
         await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
@@ -63,7 +63,10 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testLearnedHitSuppressesSelectionChangedSmartDetection() async {
-        let harness = makeHarness()
+        let harness = makeHarness(
+            smartKey: .component,
+            decision: ContextDecision(kind: .normalTextInput, lang: .chinese, source: "cursor-text")
+        )
         let focus = makeFocus(windowTitle: "English title")
         harness.smartLearning.record(componentKey, lang: .chinese)
 
@@ -73,6 +76,44 @@ final class RuleEngineTests: XCTestCase {
 
         XCTAssertEqual(harness.sources.currentID, chineseSource)
         XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+    }
+
+    func testSmartModeUsesLearningBeforeKeywordRules() async {
+        let harness = makeHarness(
+            appRules: [
+                AppRule(
+                    bundleID: "com.example.app",
+                    displayName: "Example",
+                    mode: .smart,
+                    keywordRules: [KeywordRule(keyword: "codex", lang: .chinese)]
+                ),
+            ],
+            smartKey: .component,
+            decision: ContextDecision(kind: .normalTextInput, lang: .english, source: "window-title")
+        )
+        let focus = makeFocus(windowTitle: "codex")
+        harness.smartLearning.record(componentKey, lang: .english)
+        harness.sources.currentID = chineseSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertEqual(harness.sources.selectedIDs, [englishSource])
+    }
+
+    func testSmartModeUsesKeywordBeforeDetectedTitleLanguage() async {
+        let harness = makeHarness(appRules: [
+            AppRule(
+                bundleID: "com.example.app",
+                displayName: "Example",
+                mode: .smart,
+                keywordRules: [KeywordRule(keyword: "codex", lang: .chinese)]
+            ),
+        ])
+        let focus = makeFocus(windowTitle: "codex english title")
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
     }
 
     func testWindowSwitchViaElementChangedAppliesNewWindowMemory() async {
@@ -155,13 +196,47 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testBlackBoxCodexManualSwitchRecordsOnlyWindowMemory() {
-        let harness = makeHarness()
+        let harness = makeHarness(capability: .blackBox)
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
 
         harness.engine.noteManualSwitch(sourceID: chineseSource, focus: focus)
 
         XCTAssertEqual(harness.memory.lookup(focus.key), chineseSource)
         XCTAssertNil(harness.smartLearning.lookup(componentKey))
+    }
+
+    func testSmartBlackBoxBlocksOCRForNonInputClick() async {
+        let harness = makeHarness(defaultMode: .smart)
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            element: nil,
+            hitElement: nil,
+            focusPoint: nil
+        )
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+        XCTAssertEqual(harness.sources.currentID, englishSource)
+    }
+
+    func testClickIntentHelperRecognizesInputAndNonInputRoles() {
+        XCTAssertEqual(ContextDetector.isClickInputCandidate(role: "AXTextField"), true)
+        XCTAssertEqual(ContextDetector.isClickInputCandidate(role: "AXButton"), false)
+        XCTAssertNil(ContextDetector.isClickInputCandidate(role: "AXGroup"))
+    }
+
+    func testValueChangedTriggerIsTreatedAsContentChange() async {
+        let harness = makeHarness(defaultMode: .memory)
+        let focus = makeFocus(windowTitle: "win-a")
+        harness.memory.record(focus.key, sourceID: englishSource)
+
+        await harness.engine.evaluate(focus: focus, trigger: .valueChanged)
+
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
     }
 
     func testTerminalContentChangeCanSwitchToEnglishInMemoryMode() async {
@@ -171,11 +246,15 @@ final class RuleEngineTests: XCTestCase {
 
         await harness.engine.evaluate(focus: focus, trigger: .selectionChanged)
 
-        XCTAssertEqual(harness.sources.selectedIDs, [englishSource])
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
     }
 
     func testContextKindSeparatesLearnedValues() async {
-        let harness = makeHarness(contextKeyedLearning: true)
+        let harness = makeHarness(
+            contextKeyedLearning: true,
+            smartKey: .contextDriven,
+            decision: ContextDecision(kind: .assistantChatInput, lang: .english, source: "assistant-chat")
+        )
         let chatFocus = makeFocus(bundleID: "com.example.chat", appName: "Chat", windowTitle: "Chat input")
         let terminalFocus = makeFocus(bundleID: "com.apple.Terminal", appName: "Terminal", windowTitle: "Terminal")
 
@@ -188,7 +267,7 @@ final class RuleEngineTests: XCTestCase {
         await harness.engine.evaluate(focus: terminalFocus, trigger: .appActivated)
 
         XCTAssertEqual(harness.smartLearning.lookup(SmartLearningKey(rawValue: "component:assistantChatInput")), .chinese)
-        XCTAssertEqual(harness.sources.selectedIDs, [englishSource])
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
     }
 
     func testKeywordRuleCanOverrideAfterManualOverride() async {
@@ -221,7 +300,10 @@ final class RuleEngineTests: XCTestCase {
         defaultMode: AppMode = .smart,
         smartLearningEnabled: Bool = true,
         appRules: [AppRule] = [],
-        contextKeyedLearning: Bool = false
+        contextKeyedLearning: Bool = false,
+        smartKey: SmartKeyMode = .none,
+        capability: AXCapability = .componentVisible,
+        decision: ContextDecision? = nil
     ) -> Harness {
         let defaults = UserDefaults(suiteName: "RuleEngineTests.\(UUID().uuidString)")!
         let settings = SettingsStore(defaults: defaults, key: "settings")
@@ -241,10 +323,19 @@ final class RuleEngineTests: XCTestCase {
             memory: memory,
             smartLearning: smartLearning,
             smartKeyForFocus: { _, contextKind in
-                contextKeyedLearning
-                    ? SmartLearningKey(rawValue: "component:\(contextKind.rawValue)")
-                    : self.componentKey
-            }
+                switch smartKey {
+                case .none:
+                    return self.componentKey
+                case .component:
+                    return self.componentKey
+                case .contextDriven:
+                    return contextKeyedLearning
+                        ? SmartLearningKey(rawValue: "component:\(contextKind.rawValue)")
+                        : self.componentKey
+                }
+            },
+            capabilityForFocus: { _ in capability },
+            decisionForFocus: { _, _ in decision }
         )
         return Harness(
             engine: engine,
@@ -257,15 +348,26 @@ final class RuleEngineTests: XCTestCase {
     private func makeFocus(
         bundleID: String = "com.example.app",
         appName: String = "Example",
-        windowTitle: String = "Test"
+        windowTitle: String = "Test",
+        element: AXUIElement? = nil,
+        hitElement: AXUIElement? = nil,
+        focusPoint: CGPoint? = nil
     ) -> FocusTracker.Focus {
         FocusTracker.Focus(
             bundleID: bundleID,
             appName: appName,
             window: nil,
             windowTitle: windowTitle,
-            element: nil
+            element: element,
+            hitElement: hitElement,
+            focusPoint: focusPoint
         )
+    }
+
+    private enum SmartKeyMode {
+        case none
+        case component
+        case contextDriven
     }
 }
 

@@ -20,48 +20,37 @@ enum AXGeometry {
     }
 
     /// 光标在屏幕上的矩形，按优先级：
-    /// 选区/光标单字符 bounds → 尺寸合理的焦点元素（真实字段）→ 鼠标位置 → 大元素/窗口 bounds。
-    /// 黑箱应用里焦点元素往往没有几何或是个大容器，此时用「鼠标位置」作锚点
-    /// （用户点击/聚焦的输入框或终端行通常就在鼠标处），避免退化成整窗/整屏 OCR。
-    static func caretScreenRect(element: AXUIElement?, window: AXUIElement?) -> CaretLocation? {
-        var elementBounds: CGRect?
-        if let element {
-            if let selection = AX.copyRange(element, kAXSelectedTextRangeAttribute as String) {
-                // 有选区：直接用选区范围的 bounds
-                if selection.length > 0,
-                   let rect = AX.copyBoundsForRange(element, selection),
-                   rect.width > 1, rect.height > 1 {
-                    return CaretLocation(rect: rect, source: "selection")
-                }
-                // 纯光标：探取光标处单字符的 bounds（高度≈行高）
-                let probe = CFRange(location: selection.location, length: 1)
-                if let rect = AX.copyBoundsForRange(element, probe), rect.height > 1 {
-                    return CaretLocation(rect: rect, source: "caret")
-                }
-            }
-            if let origin = AX.copyPosition(element),
-               let size = AX.copySize(element),
-               size.width > 1, size.height > 1 {
-                elementBounds = CGRect(origin: origin, size: size)
-            }
-            // 元素是「真实字段」（尺寸合理）→ 最准，直接用。
-            if let bounds = elementBounds, bounds.height <= 200, bounds.width <= 900 {
-                return CaretLocation(rect: bounds, source: "element")
-            }
+    /// 选区/光标单字符 bounds → hit-test 元素 → 尺寸合理的焦点元素 → 触发点 → 当前鼠标 → 大元素/窗口。
+    /// 关键是使用触发事件时保存下来的 `focusPoint`，避免防抖/OCR await 期间鼠标移动后读错区域。
+    static func caretScreenRect(
+        element: AXUIElement?,
+        hitElement: AXUIElement? = nil,
+        focusPoint: CGPoint? = nil,
+        window: AXUIElement?
+    ) -> CaretLocation? {
+        if let rect = preciseTextRect(from: element) {
+            return CaretLocation(rect: rect, source: "selection")
         }
-        // 鼠标位置兜底（CG 全局坐标，无需翻转）：黑箱/大容器场景下点击处≈输入位置。
+        if let rect = preciseTextRect(from: hitElement) {
+            return CaretLocation(rect: rect, source: "hit-caret")
+        }
+        if let bounds = compactBounds(of: hitElement, maxHeight: 260, maxWidth: 1200) {
+            return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "hit-element")
+        }
+        if let bounds = compactBounds(of: element, maxHeight: 220, maxWidth: 1000) {
+            return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "element")
+        }
+        if let focusPoint {
+            return CaretLocation(rect: CGRect(origin: focusPoint, size: CGSize(width: 1, height: 1)), source: "focus-point")
+        }
         if let mouse = CGEvent(source: nil)?.location {
-            return CaretLocation(rect: CGRect(origin: mouse, size: CGSize(width: 1, height: 1)), source: "mouse")
+            return CaretLocation(rect: CGRect(origin: mouse, size: CGSize(width: 1, height: 1)), source: "mouse-live")
         }
-        // 都不行：退回大元素 bounds，再退回窗口 bounds（仅用于粗略整区 OCR）。
-        if let bounds = elementBounds {
-            return CaretLocation(rect: bounds, source: "element-large")
+        if let bounds = bounds(of: element) {
+            return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "element-large")
         }
-        if let window,
-           let origin = AX.copyPosition(window),
-           let size = AX.copySize(window),
-           size.width > 1, size.height > 1 {
-            return CaretLocation(rect: CGRect(origin: origin, size: size), source: "window")
+        if let bounds = bounds(of: window) {
+            return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "window")
         }
         return nil
     }
@@ -95,5 +84,41 @@ enum AXGeometry {
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
         CGGetActiveDisplayList(count, &ids, &count)
         return ids.prefix(Int(count)).reduce(CGRect.null) { CGRectUnion($0, CGDisplayBounds($1)) }
+    }
+
+    private static func preciseTextRect(from element: AXUIElement?) -> CGRect? {
+        guard let element,
+              let selection = AX.copyRange(element, kAXSelectedTextRangeAttribute as String)
+        else { return nil }
+        if selection.length > 0,
+           let rect = AX.copyBoundsForRange(element, selection),
+           rect.width > 1, rect.height > 1 {
+            return rect
+        }
+        let probe = CFRange(location: selection.location, length: 1)
+        guard let rect = AX.copyBoundsForRange(element, probe), rect.height > 1 else { return nil }
+        return rect
+    }
+
+    private static func compactBounds(of element: AXUIElement?, maxHeight: CGFloat, maxWidth: CGFloat) -> CGRect? {
+        guard let rect = bounds(of: element),
+              rect.height > 1, rect.width > 1,
+              rect.height <= maxHeight, rect.width <= maxWidth
+        else { return nil }
+        return rect
+    }
+
+    private static func bounds(of element: AXUIElement?) -> CGRect? {
+        guard let element,
+              let origin = AX.copyPosition(element),
+              let size = AX.copySize(element),
+              size.width > 1, size.height > 1
+        else { return nil }
+        return CGRect(origin: origin, size: size)
+    }
+
+    private static func pointAdjusted(_ rect: CGRect, toward point: CGPoint?) -> CGRect {
+        guard let point, rect.contains(point), rect.height > 80 else { return rect }
+        return CGRect(x: point.x, y: point.y, width: 1, height: 1)
     }
 }

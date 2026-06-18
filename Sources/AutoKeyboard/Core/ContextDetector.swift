@@ -18,18 +18,29 @@ enum ContextKind: String, Hashable {
 
 enum AXCapability: String, Hashable {
     case componentVisible
-    case textVisible
+    case textVisibleStrong
+    case textVisibleWeak
     case blackBox
 
     var label: String {
         switch self {
         case .componentVisible:
             "AX 智能可用"
-        case .textVisible:
-            "AX 不完整，使用窗口记忆"
+        case .textVisibleStrong:
+            "AX 可读，允许智能识别"
+        case .textVisibleWeak:
+            "AX 弱可读，优先 OCR"
         case .blackBox:
             "AX 黑盒，无法定位具体输入组件"
         }
+    }
+
+    var allowsAXDetection: Bool {
+        self == .componentVisible || self == .textVisibleStrong
+    }
+
+    var prefersOCRInSmartMode: Bool {
+        self == .textVisibleWeak || self == .blackBox
     }
 }
 
@@ -197,16 +208,23 @@ enum ContextDetector {
         windowText: String?,
         hasElement: Bool
     ) -> AXCapability {
+        let electronLike = isElectronLikeHost(bundleID)
         if hasComponentSignal(elementNodes: elementNodes, hasElement: hasElement) {
             return .componentVisible
         }
-        if hasVisibleText(cursorText) || hasVisibleText(regionText) || hasVisibleText(windowText) {
-            return .textVisible
+        if hasVisibleText(cursorText) || hasVisibleText(regionText) {
+            return .textVisibleStrong
         }
-        if isElectronLikeHost(bundleID) {
+        if electronLike, hasVisibleText(windowText) {
+            return .textVisibleWeak
+        }
+        if electronLike {
             return .blackBox
         }
-        return .textVisible
+        if hasVisibleText(windowText) {
+            return .textVisibleStrong
+        }
+        return .blackBox
     }
 
     static func detectDecision(
@@ -302,17 +320,23 @@ enum ContextDetector {
         regionText: String?
     ) -> ContextDecision? {
         let line = text.map(currentLine)
-        let regionLine = currentLine(regionTail(regionText))
+        let regionTailText = regionTail(regionText)
+        let regionLine = currentLine(regionTailText)
         guard isTerminalContext(bundleID: bundleID, haystack: haystack, currentLine: line, regionLine: regionLine, regionText: regionText) else { return nil }
-        if let line, looksLikePromptLine(line), !containsTerminalAgentKeyword(line) {
+
+        let titleIsChrome = bundleID != nil && isElectronLikeHost(bundleID)
+        let agentScope = titleIsChrome
+            ? [regionTailText, line ?? ""].joined(separator: "\n")
+            : [haystack, regionTailText, line ?? ""].joined(separator: "\n")
+        if containsTerminalAgentKeyword(agentScope) {
+            return ContextDecision(kind: .terminalAgent, lang: .chinese, source: "terminal-agent")
+        }
+
+        if let line, looksLikePromptLine(line) {
             return ContextDecision(kind: .terminalShell, lang: .english, source: "terminal-prompt")
         }
-        if looksLikePromptLine(regionLine), !containsTerminalAgentKeyword(regionLine) {
+        if looksLikePromptLine(regionLine) {
             return ContextDecision(kind: .terminalShell, lang: .english, source: "terminal-region-prompt")
-        }
-        let agentHaystack = [haystack, regionTail(regionText), line ?? ""].joined(separator: "\n")
-        if containsTerminalAgentKeyword(agentHaystack) {
-            return ContextDecision(kind: .terminalAgent, lang: .chinese, source: "terminal-agent")
         }
         return ContextDecision(kind: .terminalShell, lang: .english, source: "terminal-shell")
     }
@@ -550,6 +574,47 @@ enum ContextDetector {
             || bundleID == "com.openai.codex"
             || bundleID == "ai.opencode.desktop"
             || bundleID == "com.anthropic.claudefordesktop"
+    }
+
+    static func isClickInputCandidate(element: AXUIElement?) -> Bool? {
+        guard let element else { return nil }
+        let role = AX.copyString(element, kAXRoleAttribute as String) ?? ""
+        let subrole = AX.copyString(element, kAXSubroleAttribute as String) ?? ""
+        return isClickInputCandidate(role: role, subrole: subrole)
+    }
+
+    static func isClickInputCandidate(role: String, subrole: String? = nil) -> Bool? {
+        let lowerRole = role.lowercased()
+        let lowerSubrole = subrole?.lowercased() ?? ""
+
+        if focusRegionTextRoles.contains(role) {
+            return true
+        }
+        if lowerRole.contains("textfield")
+            || lowerRole.contains("textarea")
+            || lowerRole.contains("searchfield")
+            || lowerRole.contains("combo")
+            || lowerRole.contains("editor")
+            || lowerSubrole.contains("textfield")
+        {
+            return true
+        }
+        if lowerRole.contains("button")
+            || lowerRole.contains("menu")
+            || lowerRole.contains("toolbar")
+            || lowerRole.contains("checkbox")
+            || lowerRole.contains("radio")
+            || lowerRole.contains("link")
+            || lowerRole.contains("tab")
+            || lowerRole.contains("popup")
+            || lowerRole.contains("slider")
+            || lowerRole.contains("stepper")
+            || lowerRole.contains("splitter")
+            || lowerRole.contains("scrollbar")
+        {
+            return false
+        }
+        return nil
     }
 
     private static func regionTail(_ text: String?) -> String {
