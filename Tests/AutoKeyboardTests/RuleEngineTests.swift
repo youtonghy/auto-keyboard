@@ -1,3 +1,4 @@
+import ApplicationServices
 import XCTest
 
 @testable import AutoKeyboard
@@ -206,14 +207,13 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testSmartBlackBoxBlocksOCRForNonInputClick() async {
-        let harness = makeHarness(defaultMode: .smart)
+        let harness = makeHarness(defaultMode: .smart, capability: .blackBox)
         let focus = makeFocus(
             bundleID: "com.openai.codex",
             appName: "Codex",
             windowTitle: "Codex",
-            element: nil,
-            hitElement: nil,
-            focusPoint: nil
+            hitElement: makeElement(),
+            focusPoint: CGPoint(x: 100, y: 100)
         )
         harness.sources.currentID = englishSource
 
@@ -221,6 +221,77 @@ final class RuleEngineTests: XCTestCase {
 
         XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
         XCTAssertEqual(harness.sources.currentID, englishSource)
+        XCTAssertTrue(harness.ocrCalls.values.isEmpty)
+    }
+
+    func testSmartBlackBoxRunsOCRForInputClickElementChanged() async {
+        let harness = makeHarness(defaultMode: .smart, ocrAssistedDetection: true, capability: .blackBox, clickInputCandidate: true, ocrText: "中文输入")
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            hitElement: makeElement(),
+            focusPoint: CGPoint(x: 100, y: 100)
+        )
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertEqual(harness.ocrCalls.values.count, 1)
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
+    }
+
+    func testSmartBlackBoxDoesNotRunOCRForButtonClick() async {
+        let harness = makeHarness(defaultMode: .smart, ocrAssistedDetection: true, capability: .blackBox, clickInputCandidate: false, ocrText: "中文输入")
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            hitElement: makeElement(),
+            focusPoint: CGPoint(x: 100, y: 100)
+        )
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertTrue(harness.ocrCalls.values.isEmpty)
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+    }
+
+    func testSmartBlackBoxRunsOCRForUnknownClickInScrollArea() async {
+        let harness = makeHarness(defaultMode: .smart, ocrAssistedDetection: true, capability: .blackBox, clickInputCandidate: nil, ocrText: "中文输入")
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            hitElement: makeElement(),
+            focusPoint: CGPoint(x: 100, y: 100)
+        )
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertEqual(harness.ocrCalls.values.count, 1)
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
+    }
+
+    func testBlackBoxInputClickUsesExpandedClickPointCaptureArea() async {
+        let harness = makeHarness(defaultMode: .smart, ocrAssistedDetection: true, capability: .blackBox, clickInputCandidate: nil, ocrText: "中文输入")
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            hitElement: makeElement(),
+            focusPoint: CGPoint(x: 120, y: 220)
+        )
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertEqual(harness.ocrCalls.values.count, 1)
+        let captureRect = harness.ocrCalls.values[0].1
+        XCTAssertGreaterThan(captureRect.width, 100)
+        XCTAssertGreaterThan(captureRect.height, 40)
     }
 
     func testClickIntentHelperRecognizesInputAndNonInputRoles() {
@@ -229,12 +300,83 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertNil(ContextDetector.isClickInputCandidate(role: "AXGroup"))
     }
 
+    func testBlackBoxScrollAreaCanBeTreatedAsInputCandidate() {
+        XCTAssertTrue(ContextDetector.isBlackBoxScrollAreaInputCandidate(
+            bundleID: "com.openai.codex",
+            role: "AXScrollArea"
+        ))
+        XCTAssertFalse(ContextDetector.isBlackBoxScrollAreaInputCandidate(
+            bundleID: "com.example.app",
+            role: "AXScrollArea"
+        ))
+    }
+
+    func testBlackBoxScrollAreaDescendantCanBeTreatedAsInputCandidate() async {
+        let harness = makeHarness(defaultMode: .smart, ocrAssistedDetection: true, capability: .blackBox, clickInputCandidate: nil, ocrText: "中文输入")
+        let parent = makeElement()
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            hitElement: parent,
+            focusPoint: CGPoint(x: 100, y: 100)
+        )
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+
+        XCTAssertEqual(harness.ocrCalls.values.count, 1)
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
+    }
+
     func testValueChangedTriggerIsTreatedAsContentChange() async {
         let harness = makeHarness(defaultMode: .memory)
         let focus = makeFocus(windowTitle: "win-a")
         harness.memory.record(focus.key, sourceID: englishSource)
 
         await harness.engine.evaluate(focus: focus, trigger: .valueChanged)
+
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+    }
+
+    func testSelectionChangedStillAllowsOCRInBlackBox() async {
+        let harness = makeHarness(defaultMode: .smart, ocrAssistedDetection: true, capability: .blackBox, clickInputCandidate: nil, ocrText: "english text")
+        let focus = makeFocus(
+            bundleID: "com.openai.codex",
+            appName: "Codex",
+            windowTitle: "Codex",
+            hitElement: makeElement(),
+            focusPoint: CGPoint(x: 100, y: 100)
+        )
+        harness.sources.currentID = chineseSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .selectionChanged)
+
+        XCTAssertEqual(harness.ocrCalls.values.count, 1)
+        XCTAssertEqual(harness.sources.selectedIDs, [englishSource])
+    }
+
+    func testAutoSwitchDoesNotSetManualOverride() async {
+        let harness = makeHarness(
+            defaultMode: .smart,
+            appRules: [
+                AppRule(
+                    bundleID: "com.example.app",
+                    displayName: "Example",
+                    mode: .smart,
+                    defaultLang: .chinese
+                ),
+            ],
+            ocrText: "中文输入"
+        )
+        let focus = makeFocus(windowTitle: "win-a")
+
+        await harness.engine.evaluate(focus: focus, trigger: .appActivated)
+
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
+        harness.sources.selectedIDs.removeAll()
+        harness.sources.currentID = chineseSource
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
 
         XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
     }
@@ -299,11 +441,14 @@ final class RuleEngineTests: XCTestCase {
     private func makeHarness(
         defaultMode: AppMode = .smart,
         smartLearningEnabled: Bool = true,
+        ocrAssistedDetection: Bool = false,
         appRules: [AppRule] = [],
         contextKeyedLearning: Bool = false,
         smartKey: SmartKeyMode = .none,
         capability: AXCapability = .componentVisible,
-        decision: ContextDecision? = nil
+        clickInputCandidate: Bool? = nil,
+        decision: ContextDecision? = nil,
+        ocrText: String? = nil
     ) -> Harness {
         let defaults = UserDefaults(suiteName: "RuleEngineTests.\(UUID().uuidString)")!
         let settings = SettingsStore(defaults: defaults, key: "settings")
@@ -312,11 +457,13 @@ final class RuleEngineTests: XCTestCase {
             chineseSourceID: chineseSource,
             defaultMode: defaultMode,
             smartLearningEnabled: smartLearningEnabled,
+            ocrAssistedDetection: ocrAssistedDetection,
             appRules: appRules
         )
         let sources = FakeInputSourceManager(currentID: englishSource)
         let memory = FakeWindowStateStore()
         let smartLearning = FakeSmartLearningStore()
+        let ocrCalls = Recorder<(CGRect, CGRect, String?)>()
         let engine = RuleEngine(
             settings: settings,
             sources: sources,
@@ -335,13 +482,29 @@ final class RuleEngineTests: XCTestCase {
                 }
             },
             capabilityForFocus: { _ in capability },
-            decisionForFocus: { _, _ in decision }
+            decisionForFocus: { _, _ in decision },
+            clickInputCandidateForHitElement: { element in
+                guard element != nil else { return nil }
+                return clickInputCandidate
+            },
+            caretLocationForFocus: { _, _ in
+                AXGeometry.CaretLocation(
+                    rect: CGRect(x: 100, y: 100, width: 10, height: 20),
+                    source: "test"
+                )
+            },
+            screenCaptureTrustedForOCR: { true },
+            ocrRunner: { caretRect, captureRect, token in
+                ocrCalls.values.append((caretRect, captureRect, token))
+                return ocrText
+            }
         )
         return Harness(
             engine: engine,
             sources: sources,
             memory: memory,
-            smartLearning: smartLearning
+            smartLearning: smartLearning,
+            ocrCalls: ocrCalls
         )
     }
 
@@ -364,6 +527,10 @@ final class RuleEngineTests: XCTestCase {
         )
     }
 
+    private func makeElement() -> AXUIElement {
+        AXUIElementCreateApplication(0)
+    }
+
     private enum SmartKeyMode {
         case none
         case component
@@ -377,6 +544,11 @@ private struct Harness {
     let sources: FakeInputSourceManager
     let memory: FakeWindowStateStore
     let smartLearning: FakeSmartLearningStore
+    let ocrCalls: Recorder<(CGRect, CGRect, String?)>
+}
+
+private final class Recorder<Value> {
+    var values: [Value] = []
 }
 
 @MainActor

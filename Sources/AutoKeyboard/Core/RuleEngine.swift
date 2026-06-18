@@ -1,3 +1,4 @@
+import ApplicationServices
 import Foundation
 import os
 
@@ -10,6 +11,10 @@ final class RuleEngine {
     private let smartKeyForFocus: (FocusTracker.Focus, ContextKind) -> SmartLearningKey?
     private let capabilityForFocus: (FocusTracker.Focus) -> AXCapability
     private let decisionForFocus: (FocusTracker.Focus, AXCapability) -> ContextDecision?
+    private let clickInputCandidateForHitElement: (AXUIElement?) -> Bool?
+    private let caretLocationForFocus: (FocusTracker.Focus, AXUIElement?) -> AXGeometry.CaretLocation?
+    private let screenCaptureTrustedForOCR: () -> Bool
+    private let ocrDebugTokenFactory: () -> String
     private let fileLogger: FileLogger
 
     /// 窗口当前生效的关键词匹配结果，用于只在“匹配状态变化”时切换，
@@ -24,13 +29,11 @@ final class RuleEngine {
     private var currentContextKind: ContextKind = .unknown
     private var manualOverrideContextKind: ContextKind = .unknown
     private var manualOverrideWindowKey: String?
-    private var lastClickPoint: CGPoint?
-    private var lastClickAt: Date?
-    private var lastClickWindowKey: String?
-    private static let clickIntentTTL: TimeInterval = 0.9
+    private var manualOverrideAt: Date?
+    private static let manualOverrideTTL: TimeInterval = 1.5
 
     /// OCR 引擎与节流：OCR 较重，仅在 AX 取不到文本时兜底，并按最小间隔节流，避免连发光标事件刷爆。
-    private let ocrEngine = OCREngine()
+    private let ocrRunner: (CGRect, CGRect, String?) async -> String?
     private var lastOCRAt: Date?
     private var lastOCRAnchor: String?
     private static let ocrMinInterval: TimeInterval = 0.5
@@ -59,6 +62,29 @@ final class RuleEngine {
                 windowTitle: focus.windowTitle
             )
         },
+        clickInputCandidateForHitElement: @escaping (AXUIElement?) -> Bool? = {
+            ContextDetector.isClickInputCandidate(element: $0)
+        },
+        caretLocationForFocus: @escaping (FocusTracker.Focus, AXUIElement?) -> AXGeometry.CaretLocation? = { focus, hitElement in
+            AXGeometry.caretScreenRect(
+                element: focus.element,
+                hitElement: hitElement ?? focus.hitElement,
+                focusPoint: focus.focusPoint,
+                window: focus.window
+            )
+        },
+        screenCaptureTrustedForOCR: @escaping () -> Bool = {
+            Permissions.screenCaptureTrusted
+        },
+        ocrDebugTokenFactory: @escaping () -> String = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter.string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+                .replacingOccurrences(of: ".", with: "-")
+        },
+        ocrDebugArtifactDirectory: URL? = nil,
+        ocrRunner: ((CGRect, CGRect, String?) async -> String?)? = nil,
         fileLogger: FileLogger = FileLogger()
     ) {
         self.settings = settings
@@ -68,6 +94,18 @@ final class RuleEngine {
         self.smartKeyForFocus = smartKeyForFocus
         self.capabilityForFocus = capabilityForFocus
         self.decisionForFocus = decisionForFocus
+        self.clickInputCandidateForHitElement = clickInputCandidateForHitElement
+        self.caretLocationForFocus = caretLocationForFocus
+        self.screenCaptureTrustedForOCR = screenCaptureTrustedForOCR
+        self.ocrDebugTokenFactory = ocrDebugTokenFactory
+        if let ocrRunner {
+            self.ocrRunner = ocrRunner
+        } else {
+            self.ocrRunner = { caretRect, captureRect, token in
+                await OCREngine(debugArtifactDirectory: ocrDebugArtifactDirectory)
+                    .recognize(caretScreenRect: caretRect, captureRect: captureRect, debugToken: token)
+            }
+        }
         self.fileLogger = fileLogger
     }
 
@@ -77,6 +115,7 @@ final class RuleEngine {
               let lang = lang(for: sourceID)
         else {
             manualOverride = true
+            manualOverrideAt = Date()
             return
         }
 
@@ -93,13 +132,9 @@ final class RuleEngine {
         manualOverride = true
         manualOverrideContextKind = contextKind
         manualOverrideWindowKey = focus.key.raw
+        manualOverrideAt = Date()
 
         memory.record(focus.key, sourceID: sourceID)
-        if let point = focus.focusPoint {
-            lastClickPoint = point
-            lastClickAt = Date()
-            lastClickWindowKey = focus.key.raw
-        }
 
         guard mode == .smart,
               settings.value.smartLearningEnabled,
@@ -137,26 +172,50 @@ final class RuleEngine {
         let axDecisionIsWeak = capability.prefersOCRInSmartMode
         let clickIntent = clickIntent(for: focus)
         let inputIntent = inputIntent(for: focus, clickIntent: clickIntent)
+        let shouldAllowOCRNow = shouldAllowOCR(capability: capability, trigger: trigger, inputIntent: inputIntent)
 
+        let isClickEntry = (trigger == .elementChanged || trigger == .mouseDown) && focus.focusPoint != nil
         let isWindowEntry = trigger == .appActivated
             || trigger == .windowChanged
             || (trigger == .elementChanged && windowIdentityChanged)
-        let isFocusEntry = isWindowEntry || trigger == .elementChanged
+        let isFocusEntry = isWindowEntry || trigger == .elementChanged || isClickEntry
         let isContentChange = trigger == .titleChanged || trigger == .selectionChanged || trigger == .valueChanged
         let isSmartTrigger = isFocusEntry || isContentChange
+        if manualOverride,
+           capability == .blackBox,
+           trigger == .elementChanged,
+           inputIntent == .input,
+           manualOverrideWindowKey == windowKey {
+            manualOverride = false
+            manualOverrideContextKind = contextKind
+            manualOverrideAt = nil
+        }
+        if manualOverride,
+           let manualOverrideAt,
+           trigger == .elementChanged,
+           inputIntent == .input,
+           manualOverrideWindowKey == windowKey,
+           Date().timeIntervalSince(manualOverrideAt) > Self.manualOverrideTTL {
+            manualOverride = false
+            manualOverrideWindowKey = nil
+            manualOverrideContextKind = contextKind
+            self.manualOverrideAt = nil
+        }
         if isWindowEntry {
             // 进入新窗口/应用：完全重置，恢复自动判定
             manualOverride = false
             manualOverrideWindowKey = nil
             manualOverrideContextKind = contextKind
+            manualOverrideAt = nil
             learnedCurrentFocusEntry = false
             currentContextKind = contextKind
             currentSmartKey = capability == .blackBox ? nil : smartKeyForFocus(focus, contextKind)
-        } else if trigger == .elementChanged {
+        } else if trigger == .elementChanged || trigger == .mouseDown {
             if contextKind != currentContextKind || manualOverrideWindowKey != windowKey {
                 manualOverride = false
                 manualOverrideWindowKey = nil
                 manualOverrideContextKind = contextKind
+                manualOverrideAt = nil
             }
             // 窗口内切换字段：新组件可被学习，但保留用户在本窗口内的手动选择。
             // 关键：不重置 manualOverride，避免 tab 到相邻字段就被自动检测盖掉用户刚选的语言。
@@ -167,6 +226,7 @@ final class RuleEngine {
             manualOverride = false
             manualOverrideWindowKey = nil
             manualOverrideContextKind = contextKind
+            manualOverrideAt = nil
             currentContextKind = contextKind
             currentSmartKey = capability == .blackBox ? nil : smartKeyForFocus(focus, contextKind)
         }
@@ -175,11 +235,11 @@ final class RuleEngine {
         let mode = rule?.mode ?? settings.value.defaultMode
 
         if isFocusEntry {
-            logger.debug("eval trig=\(self.triggerLabel(trigger), privacy: .public) mode=\(mode.rawValue, privacy: .public) override=\(self.manualOverride, privacy: .public) ax=\(capability.rawValue, privacy: .public) context=\(contextKind.rawValue, privacy: .public) source=\(contextDecision?.source ?? "nil", privacy: .public) \(SmartLearningKeyBuilder.trace(bundleID: focus.bundleID, element: focus.element, contextKind: contextKind), privacy: .public)")
+            logger.debug("eval trig=\(self.triggerLabel(trigger), privacy: .public) mode=\(mode.rawValue, privacy: .public) override=\(self.manualOverride, privacy: .public) ax=\(capability.rawValue, privacy: .public) weak=\(axDecisionIsWeak, privacy: .public) click=\(self.clickIntentLabel(clickIntent), privacy: .public) input=\(self.inputIntentLabel(inputIntent), privacy: .public) allowOCR=\(shouldAllowOCRNow, privacy: .public) context=\(contextKind.rawValue, privacy: .public) source=\(contextDecision?.source ?? "nil", privacy: .public) \(self.focusSummary(focus), privacy: .public)")
         }
 
         if isSmartTrigger {
-            debugLog("eval trig=\(triggerLabel(trigger)) bundle=\(focus.bundleID) title=\"\(focus.windowTitle)\" ax=\(capability.rawValue) ctxSrc=\(contextDecision?.source ?? "nil") ctxLang=\(langLabel(contextDecision?.lang)) weak=\(axDecisionIsWeak) input=\(inputIntentLabel(inputIntent)) override=\(manualOverride) mode=\(mode.rawValue) cur=\(sources.currentID)")
+            debugLog("eval trig=\(triggerLabel(trigger)) bundle=\(focus.bundleID) title=\"\(focus.windowTitle)\" ax=\(capability.rawValue) weak=\(axDecisionIsWeak) click=\(clickIntentLabel(clickIntent)) input=\(inputIntentLabel(inputIntent)) allowOCR=\(shouldAllowOCRNow) override=\(manualOverride) mode=\(mode.rawValue) ctxSrc=\(contextDecision?.source ?? "nil") ctxLang=\(langLabel(contextDecision?.lang)) cur=\(sources.currentID) \(focusSummary(focus))")
         }
 
         var target: String?
@@ -237,7 +297,7 @@ final class RuleEngine {
 
         func ocrTarget() async -> String? {
             guard settings.value.ocrAssistedDetection else { return nil }
-            if !Permissions.screenCaptureTrusted {
+            if !screenCaptureTrustedForOCR() {
                 debugLog("ocr skip: screen capture not trusted")
                 return nil
             }
@@ -253,12 +313,7 @@ final class RuleEngine {
                 debugLog("ocr skip: input-intent gate blocked")
                 return nil
             }
-            guard let caret = AXGeometry.caretScreenRect(
-                element: focus.element,
-                hitElement: focus.hitElement,
-                focusPoint: focus.focusPoint,
-                window: focus.window
-            ) else {
+            guard let caret = caretLocationForFocus(focus, focus.hitElement) else {
                 debugLog("ocr skip: caretScreenRect nil (no element/window bounds)")
                 return nil
             }
@@ -270,8 +325,9 @@ final class RuleEngine {
             lastOCRAt = Date()
             lastOCRAnchor = anchor
             let captureRect = AXGeometry.captureRect(around: caret.rect)
-            debugLog("ocr run: caretSrc=\(caret.source) caretRect=\(String(describing: caret.rect)) capture=\(String(describing: captureRect))")
-            let ocrText = await ocrEngine.recognize(caretScreenRect: caret.rect, captureRect: captureRect)
+            let token = ocrDebugTokenFactory()
+            debugLog("ocr run: token=\(token) caretSrc=\(caret.source) caretRect=\(AX.formatRect(caret.rect)) capture=\(AX.formatRect(captureRect)) input=\(inputIntentLabel(inputIntent)) click=\(clickIntentLabel(clickIntent)) focusPoint=\(focus.focusPoint.map(AX.formatPoint) ?? "nil") hit=\(AX.debugSummary(focus.hitElement)) element=\(AX.debugSummary(focus.element))")
+            let ocrText = await ocrRunner(caret.rect, captureRect, token)
             if Task.isCancelled {
                 debugLog("ocr cancelled")
                 return nil
@@ -286,6 +342,7 @@ final class RuleEngine {
             guard let decision else { return nil }
             manualOverrideContextKind = decision.kind
             manualOverrideWindowKey = windowKey
+            debugLog("ocr accept: token=\(token) kind=\(decision.kind.rawValue) lang=\(langLabel(decision.lang)) window=\(windowKey)")
             return source(decision.lang == .chinese ? .chinese : .english)
         }
 
@@ -335,7 +392,18 @@ final class RuleEngine {
         case .titleChanged: "title"
         case .selectionChanged: "sel"
         case .valueChanged: "value"
+        case .mouseDown: "down"
         }
+    }
+
+    private func focusSummary(_ focus: FocusTracker.Focus) -> String {
+        let hitRole = focus.hitElement.flatMap { AX.copyString($0, kAXRoleAttribute as String) } ?? "nil"
+        let focusPoint = focus.focusPoint.map { "(\(Int($0.x)),\(Int($0.y)))" } ?? "nil"
+        return "bundle=\(focus.bundleID) title=\"\(focus.windowTitle)\" focusPoint=\(focusPoint) hitRole=\(hitRole)"
+    }
+
+    private func clickIntentLabel(_ intent: Bool) -> String {
+        intent ? "click" : "no-click"
     }
 
     private func isStrongContext(_ kind: ContextKind) -> Bool {
@@ -382,20 +450,61 @@ final class RuleEngine {
     }
 
     private func clickIntent(for focus: FocusTracker.Focus) -> Bool {
-        guard let lastClickAt,
-              let lastClickWindowKey,
-              lastClickWindowKey == focus.key.raw,
-              Date().timeIntervalSince(lastClickAt) <= Self.clickIntentTTL,
-              lastClickPoint != nil
-        else { return false }
+        guard focus.focusPoint != nil else { return false }
         return true
     }
 
     private func inputIntent(for focus: FocusTracker.Focus, clickIntent: Bool) -> InputIntent {
         guard clickIntent else { return .unknown }
         guard let hitElement = focus.hitElement else { return .unknown }
-        guard let explicit = ContextDetector.isClickInputCandidate(element: hitElement) else { return .unknown }
-        return explicit ? .input : .nonInput
+        if let explicit = clickInputCandidateForHitElement(hitElement) {
+            return explicit ? .input : .nonInput
+        }
+        if let role = AX.copyString(hitElement, kAXRoleAttribute as String),
+           let subrole = AX.copyString(hitElement, kAXSubroleAttribute as String),
+           ContextDetector.isBlackBoxScrollAreaInputCandidate(bundleID: focus.bundleID, role: role, subrole: subrole) {
+            return blackBoxInputDescendant(in: hitElement) != nil ? .input : .unknown
+        }
+        if isTextLikeHitElement(hitElement) {
+            return .input
+        }
+        return .unknown
+    }
+
+    private func isTextLikeHitElement(_ element: AXUIElement) -> Bool {
+        let role = AX.copyString(element, kAXRoleAttribute as String) ?? ""
+        let subrole = AX.copyString(element, kAXSubroleAttribute as String) ?? ""
+        let lowerRole = role.lowercased()
+        let lowerSubrole = subrole.lowercased()
+        if lowerRole.contains("text")
+            || lowerRole.contains("editor")
+            || lowerRole.contains("field")
+            || lowerRole.contains("content")
+            || lowerSubrole.contains("text")
+        {
+            return true
+        }
+        if AX.copyRange(element, kAXSelectedTextRangeAttribute as String) != nil
+            || AX.copyString(element, kAXValueAttribute as String) != nil
+            || AX.copyInt(element, kAXNumberOfCharactersAttribute as String) != nil {
+            return true
+        }
+        return false
+    }
+
+    private func blackBoxInputDescendant(in element: AXUIElement, depth: Int = 0) -> AXUIElement? {
+        guard depth < 4, let children = AX.copyChildren(element) else { return nil }
+        for child in children {
+            let role = AX.copyString(child, kAXRoleAttribute as String) ?? ""
+            let subrole = AX.copyString(child, kAXSubroleAttribute as String)
+            if let explicit = ContextDetector.isClickInputCandidate(role: role, subrole: subrole), explicit {
+                return child
+            }
+            if let found = blackBoxInputDescendant(in: child, depth: depth + 1) {
+                return found
+            }
+        }
+        return nil
     }
 
     private func inputIntentLabel(_ intent: InputIntent) -> String {
@@ -410,6 +519,17 @@ final class RuleEngine {
         if inputIntent == .input {
             return true
         }
+        if trigger == .mouseDown {
+            return inputIntent != .nonInput
+        }
+        if capability.prefersOCRInSmartMode {
+            switch inputIntent {
+            case .nonInput:
+                return false
+            case .input, .unknown:
+                return trigger == .elementChanged || trigger == .selectionChanged || trigger == .valueChanged
+            }
+        }
         guard capability.prefersOCRInSmartMode else { return false }
         switch inputIntent {
         case .input:
@@ -417,7 +537,7 @@ final class RuleEngine {
         case .nonInput:
             return false
         case .unknown:
-            return trigger == .selectionChanged || trigger == .valueChanged
+            return trigger == .elementChanged || trigger == .selectionChanged || trigger == .valueChanged
         }
     }
 

@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Vision
 
 /// 基于 Apple Vision 的屏幕 OCR：截取光标附近区域、识别文本，
@@ -12,11 +13,44 @@ struct OCREngine {
     private static let bandRatio: CGFloat = 0.35
     private static let maxLines = 6
 
+    private let debugArtifactDirectory: URL?
+
+    init(debugArtifactDirectory: URL? = nil) {
+        self.debugArtifactDirectory = debugArtifactDirectory
+    }
+
     /// 识别光标附近文本。`captureRect` 应以 `caretScreenRect` 为中心构造。
-    func recognize(caretScreenRect: CGRect, captureRect: CGRect) async -> String? {
+    func recognize(caretScreenRect: CGRect, captureRect: CGRect, debugToken: String? = nil) async -> String? {
         guard captureRect.width > 1, captureRect.height > 1,
               let cgImage = ScreenCapture.image(rect: captureRect) else { return nil }
+        saveDebugImageIfNeeded(cgImage: cgImage, captureRect: captureRect, debugToken: debugToken)
         return await recognizeCenterLines(in: cgImage)
+    }
+
+    private func saveDebugImageIfNeeded(cgImage: CGImage, captureRect: CGRect, debugToken: String?) {
+        guard let debugArtifactDirectory else { return }
+        let token = debugToken ?? Self.makeDebugToken()
+        let url = debugArtifactDirectory.appendingPathComponent("ocr-\(token).png")
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
+        let metadata: [CFString: Any] = [
+            kCGImagePropertyPixelWidth: cgImage.width,
+            kCGImagePropertyPixelHeight: cgImage.height,
+            kCGImagePropertyDPIWidth: 72,
+            kCGImagePropertyDPIHeight: 72,
+            kCGImagePropertyPNGDictionary: [
+                kCGImagePropertyPNGDescription: "captureRect=\(captureRect.debugDescription)"
+            ]
+        ]
+        CGImageDestinationAddImage(destination, cgImage, metadata as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return }
+    }
+
+    private static func makeDebugToken() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let base = formatter.string(from: Date())
+        return base.replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
     }
 
     private func recognizeCenterLines(in image: CGImage) async -> String? {

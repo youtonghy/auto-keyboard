@@ -34,6 +34,9 @@ enum AXGeometry {
         if let rect = preciseTextRect(from: hitElement) {
             return CaretLocation(rect: rect, source: "hit-caret")
         }
+        if let rect = textLikeRect(from: hitElement, toward: focusPoint) {
+            return CaretLocation(rect: rect, source: "hit-text-like")
+        }
         if let bounds = compactBounds(of: hitElement, maxHeight: 260, maxWidth: 1200) {
             return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "hit-element")
         }
@@ -41,10 +44,10 @@ enum AXGeometry {
             return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "element")
         }
         if let focusPoint {
-            return CaretLocation(rect: CGRect(origin: focusPoint, size: CGSize(width: 1, height: 1)), source: "focus-point")
+            return CaretLocation(rect: clickPointRect(around: focusPoint), source: "focus-point")
         }
         if let mouse = CGEvent(source: nil)?.location {
-            return CaretLocation(rect: CGRect(origin: mouse, size: CGSize(width: 1, height: 1)), source: "mouse-live")
+            return CaretLocation(rect: clickPointRect(around: mouse), source: "mouse-live")
         }
         if let bounds = bounds(of: element) {
             return CaretLocation(rect: pointAdjusted(bounds, toward: focusPoint), source: "element-large")
@@ -100,6 +103,28 @@ enum AXGeometry {
         return rect
     }
 
+    private static func textLikeRect(from element: AXUIElement?, toward point: CGPoint?) -> CGRect? {
+        guard let element,
+              let bounds = bounds(of: element),
+              bounds.height > 1, bounds.width > 1
+        else { return nil }
+        let role = AX.copyString(element, kAXRoleAttribute as String) ?? ""
+        let subrole = AX.copyString(element, kAXSubroleAttribute as String)
+        if let explicit = ContextDetector.isClickInputCandidate(role: role, subrole: subrole), explicit {
+            return pointAdjusted(bounds, toward: point)
+        }
+        let lowerRole = role.lowercased()
+        if lowerRole.contains("text") || lowerRole.contains("editor") || lowerRole.contains("field") {
+            return pointAdjusted(bounds, toward: point)
+        }
+        if AX.copyRange(element, kAXSelectedTextRangeAttribute as String) != nil
+            || AX.copyInt(element, kAXNumberOfCharactersAttribute as String) != nil
+            || AX.copyString(element, kAXValueAttribute as String) != nil {
+            return pointAdjusted(bounds, toward: point)
+        }
+        return nil
+    }
+
     private static func compactBounds(of element: AXUIElement?, maxHeight: CGFloat, maxWidth: CGFloat) -> CGRect? {
         guard let rect = bounds(of: element),
               rect.height > 1, rect.width > 1,
@@ -120,5 +145,9 @@ enum AXGeometry {
     private static func pointAdjusted(_ rect: CGRect, toward point: CGPoint?) -> CGRect {
         guard let point, rect.contains(point), rect.height > 80 else { return rect }
         return CGRect(x: point.x, y: point.y, width: 1, height: 1)
+    }
+
+    private static func clickPointRect(around point: CGPoint) -> CGRect {
+        CGRect(x: point.x - 180, y: point.y - 24, width: 360, height: 48)
     }
 }

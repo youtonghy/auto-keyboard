@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 final class FileLogger {
     let logURL: URL
+    let directoryURL: URL
     private let writeQueue = DispatchQueue(label: "com.autokeyboard.filelogger")
     private let formatter = ISO8601DateFormatter()
 
@@ -16,6 +17,7 @@ final class FileLogger {
             Bundle.main.bundleIdentifier ?? "AutoKeyboard", isDirectory: true
         )
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        directoryURL = dir
         logURL = dir.appendingPathComponent("debug.log")
     }
 

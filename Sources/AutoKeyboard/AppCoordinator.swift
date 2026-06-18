@@ -14,6 +14,7 @@ final class AppCoordinator: ObservableObject {
         sources: sources,
         memory: memory,
         smartLearning: smartLearning,
+        ocrDebugArtifactDirectory: fileLogger.directoryURL,
         fileLogger: fileLogger
     )
 

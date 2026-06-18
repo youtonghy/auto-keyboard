@@ -617,6 +617,13 @@ enum ContextDetector {
         return nil
     }
 
+    static func isBlackBoxScrollAreaInputCandidate(bundleID: String, role: String?, subrole: String? = nil) -> Bool {
+        guard isElectronLikeHost(bundleID) else { return false }
+        let lowerRole = role?.lowercased() ?? ""
+        let lowerSubrole = subrole?.lowercased() ?? ""
+        return lowerRole.contains("scrollarea") || lowerSubrole.contains("scrollarea")
+    }
+
     private static func regionTail(_ text: String?) -> String {
         guard let text else { return "" }
         return String(text.suffix(1000))
