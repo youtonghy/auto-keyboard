@@ -22,6 +22,7 @@ final class FocusTracker: ObservableObject {
     struct Focus {
         let bundleID: String
         let appName: String
+        let processID: pid_t?
         let window: AXUIElement?
         let windowTitle: String
         let element: AXUIElement?
@@ -114,6 +115,7 @@ final class FocusTracker: ObservableObject {
 
         let appEl = AXUIElementCreateApplication(pid)
         appElement = appEl
+        AX.setMessagingTimeout(appEl)
         // 让 Electron 应用暴露辅助功能树
         AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
@@ -155,6 +157,7 @@ final class FocusTracker: ObservableObject {
         return Focus(
             bundleID: observedBundleID,
             appName: observedAppName,
+            processID: AX.pid(of: appElement),
             window: window,
             windowTitle: title,
             element: element
@@ -165,6 +168,19 @@ final class FocusTracker: ObservableObject {
 // MARK: - AX 属性读取工具
 
 enum AX {
+    static let messagingTimeout: Float = 0.25
+
+    static func setMessagingTimeout(_ el: AXUIElement) {
+        AXUIElementSetMessagingTimeout(el, messagingTimeout)
+    }
+
+    static func pid(of el: AXUIElement?) -> pid_t? {
+        guard let el else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(el, &pid) == .success else { return nil }
+        return pid
+    }
+
     static func copyElement(_ el: AXUIElement, _ attribute: String) -> AXUIElement? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, attribute as CFString, &value) == .success,
@@ -194,6 +210,29 @@ enum AX {
             return number.stringValue
         }
         return nil
+    }
+
+    static func copyStringLikes(_ el: AXUIElement, _ attributes: [String]) -> [String: String] {
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            el,
+            attributes as CFArray,
+            AXCopyMultipleAttributeOptions(rawValue: 0),
+            &values
+        )
+        if error == .success, let array = values as? [AnyObject] {
+            var result: [String: String] = [:]
+            for (index, rawValue) in array.enumerated() where index < attributes.count {
+                guard CFGetTypeID(rawValue) != CFNullGetTypeID(),
+                      let string = stringLike(rawValue)
+                else { continue }
+                result[attributes[index]] = string
+            }
+            return result
+        }
+        return Dictionary(uniqueKeysWithValues: attributes.compactMap { attribute in
+            copyStringLike(el, attribute).map { (attribute, $0) }
+        })
     }
 
     static func copyInt(_ el: AXUIElement, _ attribute: String) -> Int? {
@@ -246,5 +285,18 @@ enum AX {
             el, kAXStringForRangeParameterizedAttribute as CFString, rangeValue, &value
         ) == .success else { return nil }
         return value as? String
+    }
+
+    private static func stringLike(_ value: AnyObject) -> String? {
+        if let string = value as? String {
+            return string
+        }
+        if let attributed = value as? NSAttributedString {
+            return attributed.string
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return nil
     }
 }

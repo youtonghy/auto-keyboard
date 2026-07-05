@@ -12,14 +12,7 @@ final class AppCoordinator: ObservableObject {
         settings: settings,
         sources: sources,
         memory: memory,
-        smartLearning: smartLearning,
-        axCapabilityForFocus: { focus in
-            ContextDetector.axCapability(
-                bundleID: focus.bundleID,
-                element: focus.element,
-                window: focus.window
-            )
-        }
+        smartLearning: smartLearning
     )
 
     @Published var axTrusted = false

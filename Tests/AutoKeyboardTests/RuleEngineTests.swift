@@ -97,8 +97,8 @@ final class RuleEngineTests: XCTestCase {
             smartLearningEnabled: false,
             appRules: [
                 AppRule(
-                    bundleID: "com.example.app",
-                    displayName: "Example",
+                    bundleID: "com.apple.Terminal",
+                    displayName: "Terminal",
                     mode: .memory,
                     defaultLang: .english
                 ),
@@ -127,7 +127,7 @@ final class RuleEngineTests: XCTestCase {
                 mode: .smart,
                 defaultLang: .chinese
             ),
-        ], axCapability: .blackBox)
+        ], axCapability: .blackBox, waitBeforeBlackBoxRetry: {})
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
 
         await harness.engine.evaluate(focus: focus, trigger: .appActivated)
@@ -136,7 +136,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testBlackBoxCodexWithoutMemoryOrDefaultDoesNotGuessChinese() async {
-        let harness = makeHarness(axCapability: .blackBox)
+        let harness = makeHarness(axCapability: .blackBox, waitBeforeBlackBoxRetry: {})
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
         harness.sources.currentID = englishSource
 
@@ -147,9 +147,38 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testBlackBoxCodexRestoresWindowMemoryInSmartMode() async {
-        let harness = makeHarness(axCapability: .blackBox)
+        let harness = makeHarness(axCapability: .blackBox, waitBeforeBlackBoxRetry: {})
         let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
         harness.memory.record(focus.key, sourceID: chineseSource)
+
+        await harness.engine.evaluate(focus: focus, trigger: .appActivated)
+
+        XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
+    }
+
+    func testBlackBoxFocusEntryRetriesAndUsesRecoveredSmartDecision() async {
+        let harness = makeHarness(
+            snapshots: [
+                ContextDetector.FocusSnapshot(
+                    elementNodes: [],
+                    cursorText: nil,
+                    regionText: nil,
+                    windowText: nil,
+                    hasElement: false
+                ),
+                ContextDetector.FocusSnapshot(
+                    elementNodes: [
+                        ContextDetector.FocusRegionNode(role: "AXTextArea", shortTexts: ["输入消息"]),
+                    ],
+                    cursorText: nil,
+                    regionText: nil,
+                    windowText: nil,
+                    hasElement: true
+                ),
+            ],
+            waitBeforeBlackBoxRetry: {}
+        )
+        let focus = makeFocus(bundleID: "com.openai.codex", appName: "Codex", windowTitle: "Codex")
 
         await harness.engine.evaluate(focus: focus, trigger: .appActivated)
 
@@ -241,12 +270,53 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(harness.sources.selectedIDs, [chineseSource])
     }
 
+    func testKeywordRuleDoesNotSwitchOnSelectionChanged() async {
+        let harness = makeHarness(
+            defaultMode: .memory,
+            appRules: [
+                AppRule(
+                    bundleID: "com.example.app",
+                    displayName: "Example",
+                    mode: .memory,
+                    defaultLang: .english,
+                    keywordRules: [KeywordRule(keyword: "codex", lang: .chinese)]
+                ),
+            ],
+            axCapability: .componentVisible
+        )
+        let focus = makeFocus(bundleID: "com.example.app", appName: "Example", windowTitle: "codex")
+        harness.sources.currentID = englishSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .selectionChanged)
+
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+        XCTAssertEqual(harness.sources.currentID, englishSource)
+    }
+
+    func testRecentTypingSkipsSelectionChangedSwitch() async {
+        let harness = makeHarness(
+            defaultMode: .memory,
+            axCapability: .componentVisible,
+            secondsSinceLastKeyDown: { 0.1 }
+        )
+        let focus = makeFocus(bundleID: "com.apple.Terminal", appName: "Terminal", windowTitle: "Terminal")
+        harness.sources.currentID = chineseSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .selectionChanged)
+
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+        XCTAssertEqual(harness.sources.currentID, chineseSource)
+    }
+
     private func makeHarness(
         defaultMode: AppMode = .smart,
         smartLearningEnabled: Bool = true,
         appRules: [AppRule] = [],
         contextKeyedLearning: Bool = false,
-        axCapability: AXCapability = .blackBox
+        axCapability: AXCapability = .blackBox,
+        secondsSinceLastKeyDown: @escaping () -> TimeInterval = { .greatestFiniteMagnitude },
+        snapshots: [ContextDetector.FocusSnapshot]? = nil,
+        waitBeforeBlackBoxRetry: (() async -> Void)? = nil
     ) -> Harness {
         let defaults = UserDefaults(suiteName: "RuleEngineTests.\(UUID().uuidString)")!
         let settings = SettingsStore(defaults: defaults, key: "settings")
@@ -260,6 +330,7 @@ final class RuleEngineTests: XCTestCase {
         let sources = FakeInputSourceManager(currentID: englishSource)
         let memory = FakeWindowStateStore()
         let smartLearning = FakeSmartLearningStore()
+        var snapshotIndex = 0
         let engine = RuleEngine(
             settings: settings,
             sources: sources,
@@ -270,7 +341,19 @@ final class RuleEngineTests: XCTestCase {
                     ? SmartLearningKey(rawValue: "component:\(contextKind.rawValue)")
                     : self.componentKey
             },
-            axCapabilityForFocus: { _ in axCapability }
+            snapshotForFocus: { focus in
+                if let snapshots, !snapshots.isEmpty {
+                    let snapshot = snapshots[min(snapshotIndex, snapshots.count - 1)]
+                    snapshotIndex += 1
+                    return snapshot
+                }
+                return Self.snapshot(for: axCapability, focus: focus)
+            },
+            axCapabilityForFocus: { focus, snapshot in
+                snapshots == nil ? axCapability : snapshot.axCapability(bundleID: focus.bundleID)
+            },
+            secondsSinceLastKeyDown: secondsSinceLastKeyDown,
+            waitBeforeBlackBoxRetry: waitBeforeBlackBoxRetry
         )
         return Harness(
             engine: engine,
@@ -288,9 +371,37 @@ final class RuleEngineTests: XCTestCase {
         FocusTracker.Focus(
             bundleID: bundleID,
             appName: appName,
+            processID: nil,
             window: nil,
             windowTitle: windowTitle,
             element: nil
+        )
+    }
+
+    private static func snapshot(for capability: AXCapability, focus: FocusTracker.Focus) -> ContextDetector.FocusSnapshot {
+        let elementNodes: [ContextDetector.FocusRegionNode]
+        let windowText: String?
+        let hasElement: Bool
+        switch capability {
+        case .componentVisible:
+            elementNodes = [ContextDetector.FocusRegionNode(role: "AXTextArea", shortTexts: [focus.windowTitle])]
+            windowText = nil
+            hasElement = true
+        case .textVisible:
+            elementNodes = []
+            windowText = focus.windowTitle
+            hasElement = false
+        case .blackBox:
+            elementNodes = []
+            windowText = nil
+            hasElement = false
+        }
+        return ContextDetector.FocusSnapshot(
+            elementNodes: elementNodes,
+            cursorText: nil,
+            regionText: nil,
+            windowText: windowText,
+            hasElement: hasElement
         )
     }
 }

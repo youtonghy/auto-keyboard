@@ -161,37 +161,65 @@ enum ContextDetector {
         let nodes: [FocusRegionNode]
     }
 
+    struct FocusSnapshot {
+        let elementNodes: [FocusRegionNode]
+        let cursorText: String?
+        let regionText: String?
+        let windowText: String?
+        let hasElement: Bool
+
+        @MainActor
+        static func collect(element: AXUIElement?, window: AXUIElement?) -> FocusSnapshot {
+            let cursorText = element.flatMap { textNearCursor($0) }
+            let focusContext = element.map { focusRegionContext(from: $0) }
+            return FocusSnapshot(
+                elementNodes: focusContext?.nodes ?? [],
+                cursorText: cursorText,
+                regionText: focusContext?.root.map { collectText(root: $0) },
+                windowText: window.map { collectWindowText($0) },
+                hasElement: element != nil
+            )
+        }
+
+        @MainActor
+        func axCapability(bundleID: String? = nil) -> AXCapability {
+            ContextDetector.axCapability(
+                bundleID: bundleID,
+                elementNodes: elementNodes,
+                cursorText: cursorText,
+                regionText: regionText,
+                windowText: windowText,
+                hasElement: hasElement
+            )
+        }
+
+        @MainActor
+        func detectDecision(bundleID: String? = nil, windowTitle: String) -> ContextDecision? {
+            ContextDetector.detectDecision(
+                bundleID: bundleID,
+                windowTitle: windowTitle,
+                elementNodes: elementNodes,
+                cursorText: cursorText,
+                regionText: regionText,
+                windowText: windowText,
+                hasElement: hasElement
+            )
+        }
+    }
+
     /// 智能上下文判定：输入语义 → 输入正文 → 焦点区域正文 → 窗口可见内容 → 窗口标题
     static func detect(bundleID: String? = nil, element: AXUIElement?, window: AXUIElement?, windowTitle: String) -> DetectedLang? {
         detectDecision(bundleID: bundleID, element: element, window: window, windowTitle: windowTitle)?.lang
     }
 
     static func detectDecision(bundleID: String? = nil, element: AXUIElement?, window: AXUIElement?, windowTitle: String) -> ContextDecision? {
-        let cursorText = element.flatMap(textNearCursor)
-        let focusContext = element.map(focusRegionContext)
-        let nodes = focusContext?.nodes ?? []
-        return detectDecision(
-            bundleID: bundleID,
-            windowTitle: windowTitle,
-            elementNodes: nodes,
-            cursorText: cursorText,
-            regionText: focusContext?.root.map(collectText(root:)),
-            windowText: window.map(collectWindowText),
-            hasElement: element != nil
-        )
+        FocusSnapshot.collect(element: element, window: window)
+            .detectDecision(bundleID: bundleID, windowTitle: windowTitle)
     }
 
     static func axCapability(bundleID: String? = nil, element: AXUIElement?, window: AXUIElement?) -> AXCapability {
-        let cursorText = element.flatMap(textNearCursor)
-        let focusContext = element.map(focusRegionContext)
-        return axCapability(
-            bundleID: bundleID,
-            elementNodes: focusContext?.nodes ?? [],
-            cursorText: cursorText,
-            regionText: focusContext?.root.map(collectText(root:)),
-            windowText: window.map(collectWindowText),
-            hasElement: element != nil
-        )
+        FocusSnapshot.collect(element: element, window: window)
+            .axCapability(bundleID: bundleID)
     }
 
     static func axCapability(
@@ -432,12 +460,11 @@ enum ContextDetector {
     }
 
     private static func focusRegionNode(from element: AXUIElement) -> FocusRegionNode {
-        FocusRegionNode(
-            role: AX.copyString(element, kAXRoleAttribute as String) ?? "",
-            subrole: AX.copyString(element, kAXSubroleAttribute as String),
-            shortTexts: keywordAttributes.compactMap {
-                AX.copyStringLike(element, $0)
-            }
+        let values = AX.copyStringLikes(element, keywordAttributes)
+        return FocusRegionNode(
+            role: values[kAXRoleAttribute as String] ?? "",
+            subrole: values[kAXSubroleAttribute as String],
+            shortTexts: keywordAttributes.compactMap { values[$0] }
         )
     }
 
@@ -605,13 +632,18 @@ enum ContextDetector {
             return .english
         }
         let recognizer = NLLanguageRecognizer()
+        recognizer.languageConstraints = [.simplifiedChinese, .traditionalChinese, .english]
         recognizer.processString(String(text.suffix(400)))
-        switch recognizer.dominantLanguage {
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 3)
+        guard let (language, confidence) = hypotheses.max(by: { $0.value < $1.value }),
+              confidence >= 0.6
+        else { return nil }
+        switch language {
         case .simplifiedChinese, .traditionalChinese:
             return .chinese
-        case .some:
+        case .english:
             return .english
-        case nil:
+        default:
             return nil
         }
     }

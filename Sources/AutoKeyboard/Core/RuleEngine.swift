@@ -1,3 +1,5 @@
+import ApplicationServices
+import CoreGraphics
 import Foundation
 import os
 
@@ -8,7 +10,11 @@ final class RuleEngine {
     private let memory: WindowStateStoring
     private let smartLearning: SmartLearningStoring
     private let smartKeyForFocus: (FocusTracker.Focus, ContextKind) -> SmartLearningKey?
-    private let axCapabilityForFocus: (FocusTracker.Focus) -> AXCapability
+    private let snapshotForFocus: (FocusTracker.Focus) -> ContextDetector.FocusSnapshot
+    private let axCapabilityForFocus: (FocusTracker.Focus, ContextDetector.FocusSnapshot) -> AXCapability
+    private let focusedElementForProcess: (pid_t) -> AXUIElement?
+    private let secondsSinceLastKeyDown: () -> TimeInterval
+    private let waitBeforeBlackBoxRetry: () async -> Void
 
     /// 窗口当前生效的关键词匹配结果，用于只在“匹配状态变化”时切换，
     /// 避免标题频繁刷新时反复覆盖用户的手动选择
@@ -22,6 +28,7 @@ final class RuleEngine {
     private var currentContextKind: ContextKind = .unknown
     private var manualOverrideContextKind: ContextKind = .unknown
     private var manualOverrideWindowKey: String?
+    private let typingProtectionInterval: TimeInterval = 0.5
 
     /// 调试日志：在 Console.app 中按 subsystem `com.autokeyboard` 过滤、开启"显示调试信息"即可看到
     /// 每次焦点事件的指纹输入与判定结果，用于核对指纹是否稳定。
@@ -35,20 +42,34 @@ final class RuleEngine {
         smartKeyForFocus: @escaping (FocusTracker.Focus, ContextKind) -> SmartLearningKey? = {
             SmartLearningKeyBuilder.key(bundleID: $0.bundleID, element: $0.element, contextKind: $1)
         },
-        axCapabilityForFocus: @escaping (FocusTracker.Focus) -> AXCapability = {
-            ContextDetector.axCapability(
-                bundleID: $0.bundleID,
-                element: $0.element,
-                window: $0.window
-            )
-        }
+        snapshotForFocus: @escaping (FocusTracker.Focus) -> ContextDetector.FocusSnapshot = {
+            ContextDetector.FocusSnapshot.collect(element: $0.element, window: $0.window)
+        },
+        axCapabilityForFocus: @escaping (FocusTracker.Focus, ContextDetector.FocusSnapshot) -> AXCapability = {
+            $1.axCapability(bundleID: $0.bundleID)
+        },
+        focusedElementForProcess: @escaping (pid_t) -> AXUIElement? = { pid in
+            let app = AXUIElementCreateApplication(pid)
+            AX.setMessagingTimeout(app)
+            return AX.copyElement(app, kAXFocusedUIElementAttribute)
+        },
+        secondsSinceLastKeyDown: @escaping () -> TimeInterval = {
+            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        },
+        waitBeforeBlackBoxRetry: (() async -> Void)? = nil
     ) {
+        self.waitBeforeBlackBoxRetry = waitBeforeBlackBoxRetry ?? {
+            try? await Task.sleep(for: .milliseconds(350))
+        }
         self.settings = settings
         self.sources = sources
         self.memory = memory
         self.smartLearning = smartLearning
         self.smartKeyForFocus = smartKeyForFocus
+        self.snapshotForFocus = snapshotForFocus
         self.axCapabilityForFocus = axCapabilityForFocus
+        self.focusedElementForProcess = focusedElementForProcess
+        self.secondsSinceLastKeyDown = secondsSinceLastKeyDown
     }
 
     func noteManualSwitch(sourceID: String, focus: FocusTracker.Focus?) {
@@ -67,13 +88,11 @@ final class RuleEngine {
             return
         }
 
-        let decision = ContextDetector.detectDecision(
-            bundleID: focus.bundleID,
-            element: focus.element,
-            window: focus.window,
-            windowTitle: focus.windowTitle
-        )
-        let capability = axCapabilityForFocus(focus)
+        let snapshot = snapshotForFocus(focus)
+        let capability = axCapabilityForFocus(focus, snapshot)
+        let decision = capability == .blackBox
+            ? nil
+            : snapshot.detectDecision(bundleID: focus.bundleID, windowTitle: focus.windowTitle)
         let contextKind = decision?.kind ?? .unknown
         let smartJudgmentAvailable = capability.canUseSmartLanguageJudgment
         manualOverride = true
@@ -109,26 +128,42 @@ final class RuleEngine {
             lang == .chinese ? zh : en
         }
 
+        let startedAt = Date()
+        defer {
+            let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+            logger.debug("eval done trig=\(self.triggerLabel(trigger), privacy: .public) elapsed_ms=\(elapsedMs, privacy: .public)")
+        }
+
         let windowKey = focus.key.raw
         let windowIdentityChanged = windowKey != lastWindowKey
         lastWindowKey = windowKey
-        let capability = axCapabilityForFocus(focus)
-        let contextDecision = capability == .blackBox
+        var snapshot = snapshotForFocus(focus)
+        var capability = axCapabilityForFocus(focus, snapshot)
+        var contextDecision = capability == .blackBox
             ? nil
-            : ContextDetector.detectDecision(
-                bundleID: focus.bundleID,
-                element: focus.element,
-                window: focus.window,
-                windowTitle: focus.windowTitle
-            )
-        let contextKind = contextDecision?.kind ?? .unknown
-        let smartJudgmentAvailable = capability.canUseSmartLanguageJudgment
-
+            : snapshot.detectDecision(bundleID: focus.bundleID, windowTitle: focus.windowTitle)
         let isWindowEntry = trigger == .appActivated
             || trigger == .windowChanged
             || (trigger == .elementChanged && windowIdentityChanged)
         let isFocusEntry = isWindowEntry || trigger == .elementChanged
         let isContentChange = trigger == .titleChanged || trigger == .selectionChanged
+        let contentChangeProtectedByTyping = isContentChange && secondsSinceLastKeyDown() < typingProtectionInterval
+
+        if capability == .blackBox, isFocusEntry {
+            await waitBeforeBlackBoxRetry()
+            guard !Task.isCancelled else { return }
+            let retrySnapshot = snapshotForFocus(focus)
+            let retryCapability = axCapabilityForFocus(focus, retrySnapshot)
+            if retryCapability != .blackBox {
+                snapshot = retrySnapshot
+                capability = retryCapability
+                contextDecision = retrySnapshot.detectDecision(bundleID: focus.bundleID, windowTitle: focus.windowTitle)
+                logger.debug("blackbox retry recovered ax=\(retryCapability.rawValue, privacy: .public)")
+            }
+        }
+
+        let contextKind = contextDecision?.kind ?? .unknown
+        let smartJudgmentAvailable = capability.canUseSmartLanguageJudgment
         let isSmartTrigger = isFocusEntry || isContentChange
         if isWindowEntry {
             // 进入新窗口/应用：完全重置，恢复自动判定
@@ -149,7 +184,7 @@ final class RuleEngine {
             learnedCurrentFocusEntry = false
             currentContextKind = contextKind
             currentSmartKey = smartJudgmentAvailable ? smartKeyForFocus(focus, contextKind) : nil
-        } else if isContentChange, contextKind != currentContextKind {
+        } else if isContentChange, !contentChangeProtectedByTyping, contextKind != currentContextKind {
             manualOverride = false
             manualOverrideWindowKey = nil
             manualOverrideContextKind = contextKind
@@ -177,7 +212,7 @@ final class RuleEngine {
         }
 
         // 2. 上下文关键词。显式规则是用户配置的强信号，不受 manualOverride 阻挡。
-        let keywordTrigger = isFocusEntry || trigger == .titleChanged || trigger == .selectionChanged
+        let keywordTrigger = isFocusEntry || trigger == .titleChanged
         if target == nil, keywordTrigger, let rule, !rule.keywordRules.isEmpty {
             let key = focus.key.raw
             let haystack = ContextDetector.keywordHaystack(element: focus.element, windowTitle: focus.windowTitle)
@@ -249,6 +284,14 @@ final class RuleEngine {
 
         guard let target else { return }
         if target == sources.currentID { return }
+        if contentChangeProtectedByTyping {
+            logger.debug("skip switch during recent typing trigger=\(self.triggerLabel(trigger), privacy: .public)")
+            return
+        }
+        guard focusIsStillCurrent(focus) else {
+            logger.debug("skip stale switch trigger=\(self.triggerLabel(trigger), privacy: .public)")
+            return
+        }
         _ = await sources.select(id: target)
     }
 
@@ -275,6 +318,12 @@ final class RuleEngine {
         case .normalTextInput, .unknown:
             false
         }
+    }
+
+    private func focusIsStillCurrent(_ focus: FocusTracker.Focus) -> Bool {
+        guard let pid = focus.processID, let expected = focus.element else { return true }
+        guard let current = focusedElementForProcess(pid) else { return false }
+        return CFEqual(current, expected)
     }
 }
 
