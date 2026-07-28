@@ -10,6 +10,8 @@ struct SettingsView: View {
                 .tabItem { Label("通用", systemImage: "gearshape") }
             RulesTab()
                 .tabItem { Label("应用规则", systemImage: "list.bullet.rectangle") }
+            AdvancedSmartContextTab()
+                .tabItem { Label("智能", systemImage: "slider.horizontal.3") }
             AboutTab()
                 .tabItem { Label("说明", systemImage: "info.circle") }
         }
@@ -25,6 +27,7 @@ private struct GeneralTab: View {
     @EnvironmentObject private var sources: InputSourceManager
     @EnvironmentObject private var tracker: FocusTracker
     @EnvironmentObject private var smartLearning: SmartLearningStore
+    @EnvironmentObject private var loadGovernor: AXLoadGovernor
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var launchError: String?
 
@@ -73,11 +76,7 @@ private struct GeneralTab: View {
 
             Section("当前应用识别状态") {
                 if let focus = tracker.lastFocus {
-                    let capability = ContextDetector.axCapability(
-                        bundleID: focus.bundleID,
-                        element: focus.element,
-                        window: focus.window
-                    )
+                    let capability = coordinator.axCapabilityForUI(focus: focus)
                     LabeledContent("应用", value: focus.appName)
                     LabeledContent("AX 状态", value: capability.label)
                     Text("AX 黑盒或仅能看到弱文本的应用会回退到窗口记忆或应用默认；只有能读到真实输入组件语义的应用才启用智能语言判断。")
@@ -101,6 +100,38 @@ private struct GeneralTab: View {
                     .disabled(smartLearning.count == 0)
                 }
                 Text("仅在智能上下文模式中生效；记录组件指纹和中英文状态，不保存输入正文。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("智能模式负载保护") {
+                Toggle("自动暂停开销过大的应用", isOn: $settings.value.smartLoadGuard.enabled)
+                if !loadGovernor.suspendedApps.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(loadGovernor.suspendedApps) { app in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(app.appName)
+                                        .foregroundStyle(.secondary)
+                                    if app.sample.emergencyAborted {
+                                        Text("已触发紧急熔断（永久暂停）")
+                                            .font(.caption)
+                                            .foregroundStyle(.red)
+                                    }
+                                }
+                                Spacer()
+                                Button("恢复") {
+                                    loadGovernor.resume(bundleID: app.bundleID)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                    Button("全部恢复") {
+                        loadGovernor.resumeAll()
+                    }
+                }
+                Text("部分页面 AX 树极复杂，每次读取会占用主线程数百毫秒；连续超限后该应用自动改用窗口记忆，不再做智能判定。触发紧急熔断的应用会永久暂停，需手动恢复。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -252,6 +283,82 @@ private struct RuleRow: View {
                 Text(rule.mode.label)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+// MARK: - 智能上下文
+
+private struct AdvancedSmartContextTab: View {
+    @EnvironmentObject private var settings: SettingsStore
+
+    var body: some View {
+        Form {
+            editableList(
+                title: "终端 Bundle ID",
+                values: $settings.value.smartContext.terminalBundleIDs,
+                placeholder: "com.example.Terminal"
+            )
+            editableList(
+                title: "多上下文宿主 Bundle ID",
+                values: $settings.value.smartContext.multiContextHostBundleIDs,
+                placeholder: "com.example.Editor"
+            )
+            editableList(
+                title: "Agent 关键词",
+                values: $settings.value.smartContext.terminalAgentKeywords,
+                placeholder: "agent-name"
+            )
+            editableList(
+                title: "聊天语义关键词",
+                values: $settings.value.smartContext.chatSemanticKeywords,
+                placeholder: "message"
+            )
+        }
+        .formStyle(.grouped)
+    }
+
+    private func editableList(title: String, values: Binding<[String]>, placeholder: String) -> some View {
+        Section(title) {
+            ForEach(values.wrappedValue.indices, id: \.self) { index in
+                HStack {
+                    TextField(placeholder, text: Binding(
+                        get: { values.wrappedValue[index] },
+                        set: { values.wrappedValue[index] = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    Button {
+                        values.wrappedValue.remove(at: index)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            HStack {
+                Button("添加") {
+                    values.wrappedValue.append("")
+                }
+                Spacer()
+                Button("恢复默认") {
+                    reset(title: title)
+                }
+            }
+        }
+    }
+
+    private func reset(title: String) {
+        switch title {
+        case "终端 Bundle ID":
+            settings.value.smartContext.terminalBundleIDs = SmartContextSettings.defaultTerminalBundleIDs
+        case "多上下文宿主 Bundle ID":
+            settings.value.smartContext.multiContextHostBundleIDs = SmartContextSettings.defaultMultiContextHostBundleIDs
+        case "Agent 关键词":
+            settings.value.smartContext.terminalAgentKeywords = SmartContextSettings.defaultTerminalAgentKeywords
+        case "聊天语义关键词":
+            settings.value.smartContext.chatSemanticKeywords = SmartContextSettings.defaultChatSemanticKeywords
+        default:
+            break
         }
     }
 }

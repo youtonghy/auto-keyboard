@@ -8,17 +8,33 @@ final class AppCoordinator: ObservableObject {
     let tracker = FocusTracker()
     let memory = WindowStateStore()
     let smartLearning = SmartLearningStore()
+    lazy var loadGovernor = AXLoadGovernor(settings: settings)
     private lazy var engine = RuleEngine(
         settings: settings,
         sources: sources,
         memory: memory,
-        smartLearning: smartLearning
+        smartLearning: smartLearning,
+        loadGovernor: loadGovernor
     )
 
     @Published var axTrusted = false
 
     private var evalTask: Task<Void, Never>?
     private var trustTimer: Timer?
+
+    /// 统一读取应用的 AX 能力状态，由 governor 判定是否因过载而暂停智能模式。
+    /// 不记录样本——仅供 UI 状态显示。
+    func axCapabilityForUI(focus: FocusTracker.Focus) -> AXCapability {
+        let mode = loadGovernor.samplingMode(for: focus.bundleID)
+        guard mode == .full else { return .overloaded }
+        return ContextDetector.axCapability(
+            bundleID: focus.bundleID,
+            element: focus.element,
+            window: focus.window,
+            config: ContextDetectionConfig(settings: settings.value.smartContext),
+            mode: mode
+        )
+    }
 
     func start() {
         axTrusted = Permissions.axTrusted

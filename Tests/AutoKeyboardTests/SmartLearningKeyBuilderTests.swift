@@ -159,6 +159,19 @@ final class SmartLearningKeyBuilderTests: XCTestCase {
         ))
 
         XCTAssertFalse(key.rawValue.contains(secret))
-        XCTAssertTrue(key.rawValue.hasPrefix("smart-component:v3:"))
+        XCTAssertTrue(key.rawValue.hasPrefix("smart-component:v4:"))
+    }
+
+    func testBuildsExactComponentAndContextKeys() {
+        let keys = SmartLearningKeyBuilder.keys(
+            bundleID: "com.example.app",
+            nodes: [SmartLearningKeyBuilder.Node(role: "AXTextArea", placeholder: "Message")],
+            contextKind: .assistantChatInput
+        )
+
+        XCTAssertNotNil(keys.exact)
+        XCTAssertNotNil(keys.component)
+        XCTAssertNotNil(keys.context)
+        XCTAssertEqual(keys.lookupOrder.count, 3)
     }
 }

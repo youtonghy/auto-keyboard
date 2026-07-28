@@ -1,5 +1,4 @@
 import ApplicationServices
-import CryptoKit
 import Foundation
 
 /// 组件指纹生成器。
@@ -15,9 +14,10 @@ import Foundation
 ///   - 祖先结构链 `chain=<前N层 role>`（动态 Web UI 频繁变化）
 ///   - `AXIdentifier` / `AXDOMIdentifier`（网页里常是 React/MUI 自动生成，每次重渲染都变）
 ///
-/// 通用化粒度：同一 App 内 role+subrole+label 相同的输入框共用一条学习记录。
+/// 通用化粒度：同一 App 内优先使用 role+subrole+label 精确记录；没有足够信号时，
+/// 可按 role/subrole 组件档、bundle/context 上下文档逐级退弹。
 enum SmartLearningKeyBuilder {
-    static let version = "smart-component:v3"
+    static let version = "smart-component:v4"
     private static let maxTextLength = 120
     /// 向上查找语义标签的最大层数（标签常挂在焦点元素本身或其近祖容器上）
     private static let labelAncestorDepth = 8
@@ -53,16 +53,56 @@ enum SmartLearningKeyBuilder {
         }
     }
 
-    static func key(bundleID: String, element: AXUIElement?, contextKind: ContextKind = .unknown) -> SmartLearningKey? {
-        guard let element else {
-            return fallbackKey(bundleID: bundleID, contextKind: contextKind)
+    struct Keys: Equatable {
+        var exact: SmartLearningKey?
+        var component: SmartLearningKey?
+        var context: SmartLearningKey?
+
+        var lookupOrder: [SmartLearningKey] {
+            [exact, component, context].compactMap(\.self)
         }
-        return key(bundleID: bundleID, nodes: nodes(from: element), contextKind: contextKind)
+
+        var lookupCandidates: [(key: SmartLearningKey, source: String)] {
+            [
+                exact.map { ($0, "smart-exact") },
+                component.map { ($0, "smart-component") },
+                context.map { ($0, "smart-context") },
+            ].compactMap(\.self)
+        }
+    }
+
+    static func key(bundleID: String, element: AXUIElement?, contextKind: ContextKind = .unknown) -> SmartLearningKey? {
+        let keys = keys(bundleID: bundleID, element: element, contextKind: contextKind)
+        return keys.exact ?? keys.component ?? keys.context
     }
 
     static func key(bundleID: String, nodes: [Node], contextKind: ContextKind = .unknown) -> SmartLearningKey? {
-        guard !bundleID.isEmpty, let anchor = componentAnchor(nodes: nodes) else { return nil }
-        let canonical = "\(version)|bundle=\(normalize(bundleID))|context=\(contextKind.rawValue)|\(anchor)"
+        let keys = keys(bundleID: bundleID, nodes: nodes, contextKind: contextKind)
+        return keys.exact ?? keys.component ?? keys.context
+    }
+
+    static func keys(bundleID: String, element: AXUIElement?, contextKind: ContextKind = .unknown) -> Keys {
+        guard let element else {
+            let context = contextKey(bundleID: bundleID, contextKind: contextKind)
+            return Keys(exact: nil, component: nil, context: context)
+        }
+        return keys(bundleID: bundleID, nodes: nodes(from: element), contextKind: contextKind)
+    }
+
+    static func keys(bundleID: String, nodes: [Node], contextKind: ContextKind = .unknown) -> Keys {
+        guard !bundleID.isEmpty else { return Keys() }
+        let exact = exactAnchor(nodes: nodes).map {
+            digest(StableKeyEncoder.encode(version, "exact", normalize(bundleID), contextKind.rawValue, $0))
+        }.map(SmartLearningKey.init(rawValue:))
+        let component = componentAnchor(nodes: nodes).map {
+            digest(StableKeyEncoder.encode(version, "component", normalize(bundleID), contextKind.rawValue, $0))
+        }.map(SmartLearningKey.init(rawValue:))
+        let context = contextKey(bundleID: bundleID, contextKind: contextKind)
+        return Keys(exact: exact, component: component, context: context)
+    }
+
+    private static func key(bundleID: String, anchor: String, contextKind: ContextKind) -> SmartLearningKey {
+        let canonical = StableKeyEncoder.encode(version, normalize(bundleID), contextKind.rawValue, anchor)
         return SmartLearningKey(rawValue: digest(canonical))
     }
 
@@ -103,18 +143,24 @@ enum SmartLearningKeyBuilder {
         let ancestorRoles = normalizedNodes.dropFirst().prefix(labelAncestorDepth)
             .map(\.role)
             .joined(separator: ">")
-        let key = key(bundleID: bundleID, nodes: nodes, contextKind: contextKind)?.rawValue ?? "nil"
+        let keys = keys(bundleID: bundleID, nodes: nodes, contextKind: contextKind)
+        let key = keys.exact?.rawValue ?? keys.component?.rawValue ?? keys.context?.rawValue ?? "nil"
         let keyTag = String(key.prefix(20))
         return "bundle=\(bundleID) context=\(contextKind.rawValue) role=\(role) subrole=\(subrole) label=\"\(label)\" ancestors=\(ancestorRoles) key=\(keyTag)"
     }
 
-    /// 锚点：焦点元素 role/subrole + 最近的语义标签。
-    /// 只要焦点元素有 role（几乎总有），就产出指纹（即便无标签也按 role 通用化）。
+    /// 精确锚点：焦点元素 role/subrole + 最近的语义标签。
+    private static func exactAnchor(nodes: [Node]) -> String? {
+        let normalizedNodes = nodes.map(normalized)
+        guard let focused = normalizedNodes.first, !focused.role.isEmpty else { return nil }
+        guard let label = nearestLabel(in: normalizedNodes) else { return nil }
+        return "role=\(focused.role)|subrole=\(focused.subrole ?? "")|label=\(label)"
+    }
+
     private static func componentAnchor(nodes: [Node]) -> String? {
         let normalizedNodes = nodes.map(normalized)
         guard let focused = normalizedNodes.first, !focused.role.isEmpty else { return nil }
-        let label = nearestLabel(in: normalizedNodes) ?? ""
-        return "role=\(focused.role)|subrole=\(focused.subrole ?? "")|label=\(label)"
+        return "role=\(focused.role)|subrole=\(focused.subrole ?? "")"
     }
 
     /// 从焦点元素向上查找最近的语义标签（placeholder 最优先，其次 title/aria-label、description、help）。
@@ -162,13 +208,12 @@ enum SmartLearningKeyBuilder {
     }
 
     private static func digest(_ text: String) -> String {
-        let hash = SHA256.hash(data: Data(text.utf8))
-        return version + ":" + hash.prefix(16).map { String(format: "%02x", $0) }.joined()
+        version + ":" + StableDigest.sha256Prefix(text)
     }
 
-    private static func fallbackKey(bundleID: String, contextKind: ContextKind) -> SmartLearningKey? {
+    private static func contextKey(bundleID: String, contextKind: ContextKind) -> SmartLearningKey? {
         guard !bundleID.isEmpty, contextKind != .unknown else { return nil }
-        let canonical = "\(version)|bundle=\(normalize(bundleID))|context=\(contextKind.rawValue)|fallback=no-focused-element"
+        let canonical = StableKeyEncoder.encode(version, "context", normalize(bundleID), contextKind.rawValue)
         return SmartLearningKey(rawValue: digest(canonical))
     }
 }

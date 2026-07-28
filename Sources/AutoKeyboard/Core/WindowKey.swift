@@ -15,6 +15,6 @@ struct WindowKey: Hashable {
                 return
             }
         }
-        raw = "\(bundleID)#t\(title.hashValue)"
+        raw = "\(bundleID)#t\(StableDigest.sha256Prefix(title))"
     }
 }

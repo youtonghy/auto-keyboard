@@ -13,6 +13,7 @@ struct AutoKeyboardApp: App {
                 .environmentObject(delegate.coordinator.sources)
                 .environmentObject(delegate.coordinator.tracker)
                 .environmentObject(delegate.coordinator.smartLearning)
+                .environmentObject(delegate.coordinator.loadGovernor)
         }
 
         Settings {
@@ -22,6 +23,7 @@ struct AutoKeyboardApp: App {
                 .environmentObject(delegate.coordinator.sources)
                 .environmentObject(delegate.coordinator.tracker)
                 .environmentObject(delegate.coordinator.smartLearning)
+                .environmentObject(delegate.coordinator.loadGovernor)
         }
     }
 }

@@ -8,12 +8,19 @@ private func axObserverCallback(
     refcon: UnsafeMutableRawPointer?
 ) {
     guard let refcon else { return }
-    nonisolated(unsafe) let ref = refcon
     let name = notification as String
-    // 回调源在主 RunLoop 上注册，必然在主线程执行
-    MainActor.assumeIsolated {
-        let tracker = Unmanaged<FocusTracker>.fromOpaque(ref).takeUnretainedValue()
+    let callbackRef = Unmanaged<AXObserverRefcon>.fromOpaque(refcon).takeUnretainedValue()
+    Task { @MainActor in
+        guard let tracker = callbackRef.tracker else { return }
         tracker.handleAXNotification(name)
+    }
+}
+
+private final class AXObserverRefcon: @unchecked Sendable {
+    weak var tracker: FocusTracker?
+
+    init(tracker: FocusTracker) {
+        self.tracker = tracker
     }
 }
 
@@ -47,6 +54,7 @@ final class FocusTracker: ObservableObject {
 
     private var observer: AXObserver?
     private var appElement: AXUIElement?
+    private var observerRefcon: AXObserverRefcon?
     private var observedBundleID = ""
     private var observedAppName = ""
 
@@ -122,7 +130,9 @@ final class FocusTracker: ObservableObject {
         var obs: AXObserver?
         guard AXObserverCreate(pid, axObserverCallback, &obs) == .success, let obs else { return }
         observer = obs
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let callbackRef = AXObserverRefcon(tracker: self)
+        observerRefcon = callbackRef
+        let refcon = Unmanaged.passUnretained(callbackRef).toOpaque()
         for name in Self.subscribedNotifications {
             AXObserverAddNotification(obs, appEl, name as CFString, refcon)
         }
@@ -135,6 +145,7 @@ final class FocusTracker: ObservableObject {
         }
         observer = nil
         appElement = nil
+        observerRefcon = nil
     }
 
     private func emit(_ trigger: Trigger) {
@@ -186,7 +197,9 @@ enum AX {
         guard AXUIElementCopyAttributeValue(el, attribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
-        return (value as! AXUIElement)
+        let element = value as! AXUIElement
+        setMessagingTimeout(element)
+        return element
     }
 
     static func copyString(_ el: AXUIElement, _ attribute: String) -> String? {
@@ -212,7 +225,12 @@ enum AX {
         return nil
     }
 
-    static func copyStringLikes(_ el: AXUIElement, _ attributes: [String]) -> [String: String] {
+    /// 批量读多个属性。返回值带上实际发出的 IPC 次数，供负载统计使用：
+    /// 批量调用成功算 1 次，退化到逐属性读取则等于属性个数。
+    static func copyStringLikes(
+        _ el: AXUIElement,
+        _ attributes: [String]
+    ) -> (values: [String: String], reads: Int) {
         var values: CFArray?
         let error = AXUIElementCopyMultipleAttributeValues(
             el,
@@ -228,11 +246,12 @@ enum AX {
                 else { continue }
                 result[attributes[index]] = string
             }
-            return result
+            return (result, 1)
         }
-        return Dictionary(uniqueKeysWithValues: attributes.compactMap { attribute in
+        let fallback = Dictionary(uniqueKeysWithValues: attributes.compactMap { attribute in
             copyStringLike(el, attribute).map { (attribute, $0) }
         })
+        return (fallback, attributes.count)
     }
 
     static func copyInt(_ el: AXUIElement, _ attribute: String) -> Int? {
@@ -241,13 +260,16 @@ enum AX {
         return value as? Int
     }
 
+    /// `copyChildren` 会逐个尝试这些属性，因此一次调用的 IPC 次数等于该列表长度。
+    static let childrenAttributes = [
+        kAXChildrenAttribute as String,
+        "AXChildrenInNavigationOrder",
+        "AXContents",
+        "AXRows",
+    ]
+
     static func copyChildren(_ el: AXUIElement) -> [AXUIElement]? {
-        let attributes = [
-            kAXChildrenAttribute as String,
-            "AXChildrenInNavigationOrder",
-            "AXContents",
-            "AXRows",
-        ]
+        let attributes = childrenAttributes
         var children: [AXUIElement] = []
         var seen = Set<CFHashCode>()
 
@@ -260,6 +282,7 @@ enum AX {
                 let child = item as! AXUIElement
                 let hash = CFHash(child)
                 guard seen.insert(hash).inserted else { continue }
+                setMessagingTimeout(child)
                 children.append(child)
             }
         }

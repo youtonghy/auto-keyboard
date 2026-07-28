@@ -17,6 +17,7 @@ final class SettingsTests: XCTestCase {
 
         XCTAssertEqual(settings.defaultMode, .memory)
         XCTAssertTrue(settings.smartLearningEnabled)
+        XCTAssertEqual(settings.smartContext.terminalBundleIDs, SmartContextSettings.defaultTerminalBundleIDs)
     }
 
     func testDecodingDefaultMode() throws {
@@ -31,5 +32,27 @@ final class SettingsTests: XCTestCase {
         let settings = try JSONDecoder().decode(AppSettings.self, from: data)
 
         XCTAssertEqual(settings.defaultMode, .smart)
+    }
+
+    func testDecodingSmartContextSettings() throws {
+        let data = Data("""
+        {
+          "enabled": true,
+          "smartContext": {
+            "terminalBundleIDs": ["com.example.Terminal"],
+            "multiContextHostBundleIDs": ["com.example.Host"],
+            "terminalAgentKeywords": ["agent"],
+            "chatSemanticKeywords": ["compose"]
+          },
+          "appRules": []
+        }
+        """.utf8)
+
+        let settings = try JSONDecoder().decode(AppSettings.self, from: data)
+
+        XCTAssertEqual(settings.smartContext.terminalBundleIDs, ["com.example.Terminal"])
+        XCTAssertEqual(settings.smartContext.multiContextHostBundleIDs, ["com.example.Host"])
+        XCTAssertEqual(settings.smartContext.terminalAgentKeywords, ["agent"])
+        XCTAssertEqual(settings.smartContext.chatSemanticKeywords, ["compose"])
     }
 }

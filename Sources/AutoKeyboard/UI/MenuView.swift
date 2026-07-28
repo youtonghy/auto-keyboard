@@ -5,6 +5,7 @@ struct MenuView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var sources: InputSourceManager
     @EnvironmentObject private var tracker: FocusTracker
+    @EnvironmentObject private var loadGovernor: AXLoadGovernor
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -24,12 +25,15 @@ struct MenuView: View {
         Divider()
 
         if let focus = tracker.lastFocus {
-            Text(ContextDetector.axCapability(
-                bundleID: focus.bundleID,
-                element: focus.element,
-                window: focus.window
-            ).label)
-            .foregroundStyle(.secondary)
+            let capability = coordinator.axCapabilityForUI(focus: focus)
+            Text(capability.label)
+                .foregroundStyle(.secondary)
+
+            if capability == .overloaded, loadGovernor.isSuspended(focus.bundleID) {
+                Button("恢复「\(focus.appName)」的智能模式") {
+                    loadGovernor.resume(bundleID: focus.bundleID)
+                }
+            }
 
             Menu("「\(focus.appName)」的模式") {
                 appModeButtons(for: focus)

@@ -308,6 +308,51 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(harness.sources.currentID, chineseSource)
     }
 
+    func testPinyinCompositionSelectionChangedDoesNotSwitchToEnglish() async {
+        let harness = makeHarness(
+            snapshots: [
+                ContextDetector.FocusSnapshot(
+                    elementNodes: [
+                        ContextDetector.FocusRegionNode(role: "AXTextArea", shortTexts: ["Message"]),
+                    ],
+                    cursorText: "nihao",
+                    regionText: nil,
+                    windowText: nil,
+                    hasElement: true
+                ),
+            ]
+        )
+        let focus = makeFocus(bundleID: "com.example.chat", appName: "Chat", windowTitle: "Chat")
+        harness.sources.currentID = chineseSource
+
+        await harness.engine.evaluate(focus: focus, trigger: .selectionChanged)
+
+        XCTAssertTrue(harness.sources.selectedIDs.isEmpty)
+        XCTAssertEqual(harness.sources.currentID, chineseSource)
+    }
+
+    func testManualSwitchAfterAutomaticSwitchRecordsNegativeFeedback() async {
+        let harness = makeHarness(
+            snapshots: [
+                ContextDetector.FocusSnapshot(
+                    elementNodes: [
+                        ContextDetector.FocusRegionNode(role: "AXTextArea", shortTexts: ["输入消息"]),
+                    ],
+                    cursorText: nil,
+                    regionText: nil,
+                    windowText: nil,
+                    hasElement: true
+                ),
+            ]
+        )
+        let focus = makeFocus(bundleID: "com.example.chat", appName: "Chat", windowTitle: "Chat")
+
+        await harness.engine.evaluate(focus: focus, trigger: .elementChanged)
+        harness.engine.noteManualSwitch(sourceID: englishSource, focus: focus)
+
+        XCTAssertEqual(harness.smartLearning.negativeFeedback(componentKey), .chinese)
+    }
+
     private func makeHarness(
         defaultMode: AppMode = .smart,
         smartLearningEnabled: Bool = true,
@@ -331,17 +376,23 @@ final class RuleEngineTests: XCTestCase {
         let memory = FakeWindowStateStore()
         let smartLearning = FakeSmartLearningStore()
         var snapshotIndex = 0
+        let loadGovernor = AXLoadGovernor(settings: settings, now: { Date() })
         let engine = RuleEngine(
             settings: settings,
             sources: sources,
             memory: memory,
             smartLearning: smartLearning,
-            smartKeyForFocus: { _, contextKind in
-                contextKeyedLearning
-                    ? SmartLearningKey(rawValue: "component:\(contextKind.rawValue)")
-                    : self.componentKey
+            loadGovernor: loadGovernor,
+            smartKeysForFocus: { _, contextKind in
+                SmartLearningKeyBuilder.Keys(
+                    exact: contextKeyedLearning
+                        ? SmartLearningKey(rawValue: "component:\(contextKind.rawValue)")
+                        : self.componentKey,
+                    component: nil,
+                    context: nil
+                )
             },
-            snapshotForFocus: { focus in
+            snapshotForFocus: { focus, _ in
                 if let snapshots, !snapshots.isEmpty {
                     let snapshot = snapshots[min(snapshotIndex, snapshots.count - 1)]
                     snapshotIndex += 1
@@ -349,7 +400,7 @@ final class RuleEngineTests: XCTestCase {
                 }
                 return Self.snapshot(for: axCapability, focus: focus)
             },
-            axCapabilityForFocus: { focus, snapshot in
+            axCapabilityForFocus: { focus, snapshot, _ in
                 snapshots == nil ? axCapability : snapshot.axCapability(bundleID: focus.bundleID)
             },
             secondsSinceLastKeyDown: secondsSinceLastKeyDown,
@@ -391,7 +442,7 @@ final class RuleEngineTests: XCTestCase {
             elementNodes = []
             windowText = focus.windowTitle
             hasElement = false
-        case .blackBox:
+        case .blackBox, .overloaded:
             elementNodes = []
             windowText = nil
             hasElement = false
@@ -450,6 +501,7 @@ private final class FakeWindowStateStore: WindowStateStoring {
 @MainActor
 private final class FakeSmartLearningStore: SmartLearningStoring {
     private var values: [SmartLearningKey: LangChoice] = [:]
+    private var negativeValues: [SmartLearningKey: LangChoice] = [:]
 
     var count: Int { values.count }
 
@@ -461,7 +513,36 @@ private final class FakeSmartLearningStore: SmartLearningStoring {
         values[key] = lang
     }
 
+    func negativeFeedback(_ key: SmartLearningKey) -> LangChoice? {
+        negativeValues[key]
+    }
+
+    func lookup(_ keys: SmartLearningKeyBuilder.Keys) -> SmartLearningMatch? {
+        for key in keys.lookupOrder {
+            if let lang = values[key] {
+                return SmartLearningMatch(key: key, lang: lang, confidence: 1, source: "fake")
+            }
+        }
+        return nil
+    }
+
+    func recordManualCorrection(_ keys: SmartLearningKeyBuilder.Keys, lang: LangChoice) {
+        guard let key = keys.exact ?? keys.component ?? keys.context else { return }
+        values[key] = lang
+    }
+
+    func recordNegativeFeedback(_ keys: SmartLearningKeyBuilder.Keys, against lang: LangChoice) {
+        guard let key = keys.exact ?? keys.component ?? keys.context else { return }
+        negativeValues[key] = lang
+    }
+
+    func reinforce(_ keys: SmartLearningKeyBuilder.Keys, lang: LangChoice) {
+        guard let key = keys.exact else { return }
+        values[key] = lang
+    }
+
     func clear() {
         values.removeAll()
+        negativeValues.removeAll()
     }
 }

@@ -43,12 +43,110 @@ struct AppRule: Codable, Identifiable, Hashable {
     var keywordRules: [KeywordRule] = []
 }
 
+struct SmartContextSettings: Codable, Hashable {
+    var terminalBundleIDs: [String]
+    var multiContextHostBundleIDs: [String]
+    var terminalAgentKeywords: [String]
+    var chatSemanticKeywords: [String]
+
+    init(
+        terminalBundleIDs: [String] = Self.defaultTerminalBundleIDs,
+        multiContextHostBundleIDs: [String] = Self.defaultMultiContextHostBundleIDs,
+        terminalAgentKeywords: [String] = Self.defaultTerminalAgentKeywords,
+        chatSemanticKeywords: [String] = Self.defaultChatSemanticKeywords
+    ) {
+        self.terminalBundleIDs = terminalBundleIDs
+        self.multiContextHostBundleIDs = multiContextHostBundleIDs
+        self.terminalAgentKeywords = terminalAgentKeywords
+        self.chatSemanticKeywords = chatSemanticKeywords
+    }
+
+    static let defaultTerminalBundleIDs = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "dev.warp.Warp-Stable",
+        "com.mitchellh.ghostty",
+        "org.alacritty",
+        "net.kovidgoyal.kitty",
+        "com.github.wez.wezterm",
+        "co.zeit.hyper",
+        "org.tabby",
+    ]
+
+    static let defaultMultiContextHostBundleIDs = [
+        "com.openai.codex",
+        "com.microsoft.VSCode",
+        "com.microsoft.VSCodeInsiders",
+        "com.visualstudio.code.oss",
+        "com.todesktop.230313mzl4w4u92",
+        "com.exafunction.windsurf",
+        "ai.opencode.desktop",
+        "com.anthropic.claudefordesktop",
+    ]
+
+    static let defaultTerminalAgentKeywords = [
+        "codex",
+        "claude code",
+        "claude-code",
+        "claude",
+        "opencode",
+        "open code",
+    ]
+
+    static let defaultChatSemanticKeywords = [
+        "message",
+        "chat",
+        "prompt",
+        "ask",
+        "compose",
+        "reply",
+        "输入",
+        "消息",
+        "聊天",
+        "提问",
+        "发送",
+    ]
+}
+
+/// 智能模式负载保护阈值。
+///
+/// 极复杂页面上一次 AX 快照可能发出上千次跨进程读取、占用主线程数百毫秒；
+/// 若每次击键都这样读一遍，系统会明显卡顿。这里定义"多贵算太贵"以及连续多少次
+/// 之后放弃对该应用使用智能模式。
+struct SmartLoadGuardSettings: Codable, Hashable {
+    /// 单次快照允许的 AX 跨进程读取次数上限。
+    var maxAXReads: Int
+    /// 单次快照允许占用主线程的秒数上限。
+    var maxElapsedSeconds: TimeInterval
+    /// 连续超限多少次后暂停该应用的智能模式。
+    var overloadStrikes: Int
+    /// 暂停后多久放行一次完整采样试探（秒）。
+    var recheckInterval: TimeInterval
+    var enabled: Bool
+
+    init(
+        maxAXReads: Int = 700,
+        maxElapsedSeconds: TimeInterval = 0.6,
+        overloadStrikes: Int = 3,
+        recheckInterval: TimeInterval = 600,
+        enabled: Bool = true
+    ) {
+        self.maxAXReads = maxAXReads
+        self.maxElapsedSeconds = maxElapsedSeconds
+        self.overloadStrikes = overloadStrikes
+        self.recheckInterval = recheckInterval
+        self.enabled = enabled
+    }
+}
+
 struct AppSettings: Codable {
     var enabled = true
     var englishSourceID: String?
     var chineseSourceID: String?
     var defaultMode: AppMode = .memory
     var smartLearningEnabled = true
+    var smartContext = SmartContextSettings()
+    var smartLoadGuard = SmartLoadGuardSettings()
     var appRules: [AppRule] = []
 
     init(
@@ -57,6 +155,8 @@ struct AppSettings: Codable {
         chineseSourceID: String? = nil,
         defaultMode: AppMode = .memory,
         smartLearningEnabled: Bool = true,
+        smartContext: SmartContextSettings = SmartContextSettings(),
+        smartLoadGuard: SmartLoadGuardSettings = SmartLoadGuardSettings(),
         appRules: [AppRule] = []
     ) {
         self.enabled = enabled
@@ -64,6 +164,8 @@ struct AppSettings: Codable {
         self.chineseSourceID = chineseSourceID
         self.defaultMode = defaultMode
         self.smartLearningEnabled = smartLearningEnabled
+        self.smartContext = smartContext
+        self.smartLoadGuard = smartLoadGuard
         self.appRules = appRules
     }
 
@@ -73,6 +175,8 @@ struct AppSettings: Codable {
         case chineseSourceID
         case defaultMode
         case smartLearningEnabled
+        case smartContext
+        case smartLoadGuard
         case appRules
     }
 
@@ -83,6 +187,8 @@ struct AppSettings: Codable {
         chineseSourceID = try container.decodeIfPresent(String.self, forKey: .chineseSourceID)
         defaultMode = try container.decodeIfPresent(AppMode.self, forKey: .defaultMode) ?? .memory
         smartLearningEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartLearningEnabled) ?? true
+        smartContext = try container.decodeIfPresent(SmartContextSettings.self, forKey: .smartContext) ?? SmartContextSettings()
+        smartLoadGuard = try container.decodeIfPresent(SmartLoadGuardSettings.self, forKey: .smartLoadGuard) ?? SmartLoadGuardSettings()
         appRules = try container.decodeIfPresent([AppRule].self, forKey: .appRules) ?? []
     }
 }

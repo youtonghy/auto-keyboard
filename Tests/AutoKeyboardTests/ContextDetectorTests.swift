@@ -30,6 +30,43 @@ final class ContextDetectorTests: XCTestCase {
         XCTAssertEqual(decision?.lang, .chinese)
     }
 
+    func testCursorTextBeatsChatPlaceholderSemantic() {
+        let decision = ContextDetector.detectDecision(
+            bundleID: "com.example.chat",
+            windowTitle: "Assistant",
+            elementNodes: [
+                ContextDetector.FocusRegionNode(
+                    role: "AXTextArea",
+                    shortTexts: ["Message"]
+                ),
+            ],
+            cursorText: "Please keep this paragraph in English",
+            regionText: nil
+        )
+
+        XCTAssertEqual(decision?.kind, .normalTextInput)
+        XCTAssertEqual(decision?.lang, .english)
+        XCTAssertEqual(decision?.source, "cursor-text")
+    }
+
+    func testSecureTextFieldForcesEnglish() {
+        let decision = ContextDetector.detectDecision(
+            bundleID: "com.example.app",
+            windowTitle: "登录",
+            elementNodes: [
+                ContextDetector.FocusRegionNode(
+                    role: "AXSecureTextField",
+                    shortTexts: ["密码"]
+                ),
+            ],
+            cursorText: nil,
+            regionText: "请输入密码"
+        )
+
+        XCTAssertEqual(decision?.lang, .english)
+        XCTAssertEqual(decision?.source, "secure-field")
+    }
+
     func testCodexWithoutAXFocusReturnsUnknownInsteadOfFallbackChinese() {
         let decision = ContextDetector.detectDecision(
             bundleID: "com.openai.codex",
@@ -122,6 +159,25 @@ final class ContextDetectorTests: XCTestCase {
         )
     }
 
+    func testCustomTerminalBundleIDIsRecognized() {
+        let config = ContextDetectionConfig(settings: SmartContextSettings(
+            terminalBundleIDs: ["com.example.Terminal"],
+            multiContextHostBundleIDs: [],
+            terminalAgentKeywords: SmartContextSettings.defaultTerminalAgentKeywords,
+            chatSemanticKeywords: SmartContextSettings.defaultChatSemanticKeywords
+        ))
+
+        XCTAssertEqual(
+            ContextDetector.detectTerminalContext(
+                bundleID: "com.example.Terminal",
+                haystack: "Project",
+                text: "plain text",
+                config: config
+            ),
+            .english
+        )
+    }
+
     func testTerminalPromptFallbackForUnknownTerminal() {
         XCTAssertEqual(
             ContextDetector.detectTerminalContext(
@@ -204,6 +260,25 @@ final class ContextDetectorTests: XCTestCase {
         )
     }
 
+    func testCustomTerminalAgentKeywordUsesChinese() {
+        let config = ContextDetectionConfig(settings: SmartContextSettings(
+            terminalBundleIDs: ["com.apple.Terminal"],
+            multiContextHostBundleIDs: [],
+            terminalAgentKeywords: ["myagent"],
+            chatSemanticKeywords: SmartContextSettings.defaultChatSemanticKeywords
+        ))
+
+        XCTAssertEqual(
+            ContextDetector.detectTerminalContext(
+                bundleID: "com.apple.Terminal",
+                haystack: "Terminal",
+                text: "$ myagent",
+                config: config
+            ),
+            .chinese
+        )
+    }
+
     func testNonTerminalContextIsNotForced() {
         XCTAssertNil(
             ContextDetector.detectTerminalContext(
@@ -211,6 +286,28 @@ final class ContextDetectorTests: XCTestCase {
                 text: "你好，帮我写一段说明"
             )
         )
+    }
+
+    func testCustomChatSemanticKeywordUsesAssistantChatInput() {
+        let config = ContextDetectionConfig(settings: SmartContextSettings(
+            terminalBundleIDs: [],
+            multiContextHostBundleIDs: [],
+            terminalAgentKeywords: [],
+            chatSemanticKeywords: ["compose-box"]
+        ))
+        let decision = ContextDetector.detectDecision(
+            bundleID: "com.example.chat",
+            windowTitle: "Assistant",
+            elementNodes: [
+                ContextDetector.FocusRegionNode(role: "AXTextArea", shortTexts: ["compose-box"]),
+            ],
+            cursorText: nil,
+            regionText: nil,
+            config: config
+        )
+
+        XCTAssertEqual(decision?.kind, .assistantChatInput)
+        XCTAssertEqual(decision?.lang, .chinese)
     }
 
     func testEditorWithShellLikeTextIsNotTreatedAsTerminal() {
@@ -301,6 +398,28 @@ final class ContextDetectorTests: XCTestCase {
                 regionText: nil,
                 windowText: nil,
                 hasElement: false
+            ),
+            .blackBox
+        )
+    }
+
+    func testCustomMultiContextHostTreatsEmptyTreeAsBlackBox() {
+        let config = ContextDetectionConfig(settings: SmartContextSettings(
+            terminalBundleIDs: [],
+            multiContextHostBundleIDs: ["com.example.Host"],
+            terminalAgentKeywords: [],
+            chatSemanticKeywords: []
+        ))
+
+        XCTAssertEqual(
+            ContextDetector.axCapability(
+                bundleID: "com.example.Host",
+                elementNodes: [],
+                cursorText: nil,
+                regionText: nil,
+                windowText: nil,
+                hasElement: false,
+                config: config
             ),
             .blackBox
         )
@@ -437,5 +556,13 @@ final class ContextDetectorTests: XCTestCase {
         ]
 
         XCTAssertNil(KeywordMatcher.match(in: "plain editor", rules: rules))
+    }
+
+    func testMixedCodeCommentWithSmallChineseRatioIsNotForcedChinese() {
+        XCTAssertNotEqual(ContextDetector.classify("let value = computeResult() // 中文"), .chinese)
+    }
+
+    func testHighChineseRatioStillClassifiesChinese() {
+        XCTAssertEqual(ContextDetector.classify("你好，这是一段中文内容 with note"), .chinese)
     }
 }
